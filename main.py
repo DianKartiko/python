@@ -3,7 +3,8 @@ import sqlite3
 import datetime
 import paho.mqtt.client as mqtt
 from openpyxl import Workbook
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler
 from dotenv import load_dotenv
 import os
 
@@ -38,7 +39,7 @@ def on_message(client, userdata, msg):
     try:
         suhu = float(msg.payload.decode())
         latest_suhu = suhu
-        print(f"[MQTT] Data diterima: {suhu}")
+        print(f"[MQTT] Data diterima: {suhu + 30}")
     except Exception as e:
         print("Error parsing data:", e)
 
@@ -48,11 +49,11 @@ client.connect(MQTT_BROKER, MQTT_PORT, 60)
 client.subscribe(MQTT_TOPIC)
 client.loop_start()
 
-# === SIMPAN DATA SETIAP 1 MENIT ===
+# === SIMPAN DATA SETIAP 10 MENIT ===
 async def save_data_task():
     global latest_suhu
     while True:
-        await asyncio.sleep(60)  # 1 menit
+        await asyncio.sleep(600)  # 10 menit
         if latest_suhu is not None:
             waktu = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             c.execute("INSERT INTO suhu (waktu, suhu) VALUES (?, ?)", (waktu, latest_suhu))
@@ -61,11 +62,11 @@ async def save_data_task():
         else:
             print("[DB] Belum ada data suhu diterima dari MQTT")
 
-# === KIRIM FILE EXCEL SETIAP 15 MENIT ===
+# === KIRIM FILE EXCEL SETIAP 3 MENIT ===
 async def send_excel_task():
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
-        await asyncio.sleep(900)  # 15 menit
+        await asyncio.sleep(10800)  # 3 menit
 
         # Ambil data 15 menit terakhir
         waktu_awal = (datetime.datetime.now() - datetime.timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
@@ -95,7 +96,7 @@ async def send_excel_task():
 async def main():
     await asyncio.gather(
         save_data_task(),
-        send_excel_task()
+        send_excel_task(),
     )
 
 if __name__ == "__main__":
