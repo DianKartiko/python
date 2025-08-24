@@ -6,15 +6,27 @@
 app = 'python-internet-of-things-suhu'
 primary_region = 'sin'
 
+[mounts]
+  source = "data_volume"
+  destination = "/data"
+
 [build]
 
 [http_service]
+  protocol = "tcp"
   internal_port = 8080
   force_https = true
-  auto_stop_machines = 'stop'
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ['app']
+
+[env]
+  MQTT_BROKER = "broker.address"
+  MQTT_TOPIC = "esp32/suhu"
+  TELEGRAM_TOKEN = "8496188523:AAE6hcwc3R1XSQu7qj8lb4h6TMy_VFUGa1Y"
+  CHAT_ID = "1883098635"
+  PORT = "8080"
 
 [[vm]]
   memory = '1gb'
