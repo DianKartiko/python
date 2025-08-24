@@ -3,6 +3,8 @@ import threading
 import sqlite3
 import datetime
 import time
+from zoneinfo import ZoneInfo  # Python 3.9+
+# Alternatif untuk Python < 3.9: pip install pytz
 import paho.mqtt.client as mqtt
 from openpyxl import Workbook
 import telegram
@@ -25,12 +27,17 @@ MQTT_TOPIC = os.getenv("MQTT_TOPIC")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# === INTERVAL KONFIGURASI ===
+DATA_SAVE_INTERVAL = 300  # 5 menit (300 detik)
+EXCEL_SEND_INTERVAL = 10800  # 3 jam (10800 detik)
+
 # Validasi konfigurasi
 if not all([MQTT_BROKER, MQTT_TOPIC, TELEGRAM_TOKEN, CHAT_ID]):
     logger.error("Missing required environment variables")
     exit(1)
 
 logger.info(f"Config loaded - Broker: {MQTT_BROKER}, Topic: {MQTT_TOPIC}, Chat ID: {CHAT_ID}")
+logger.info(f"Intervals - Data Save: {DATA_SAVE_INTERVAL//60} minutes, Excel Send: {EXCEL_SEND_INTERVAL//3600} hours")
 
 # === DATABASE === 
 DB_PATH = "/data/data_suhu.db" if os.path.exists("/data") else "data_suhu.db"
@@ -54,6 +61,21 @@ c.execute("""
 conn.commit()
 conn.close()
 logger.info(f"Database initialized at: {DB_PATH}")
+
+# === TIMEZONE CONFIGURATION ===
+INDONESIA_TZ = ZoneInfo("Asia/Jakarta")  # WIB (GMT+7)
+# INDONESIA_TZ = ZoneInfo("Asia/Makassar")  # WITA (GMT+8) 
+# INDONESIA_TZ = ZoneInfo("Asia/Jayapura")  # WIT (GMT+9)
+
+def get_indonesia_time():
+    """Get current time in Indonesia timezone"""
+    return datetime.datetime.now(INDONESIA_TZ)
+
+def format_indonesia_time(dt=None):
+    """Format time in Indonesian format with timezone"""
+    if dt is None:
+        dt = get_indonesia_time()
+    return dt.strftime("%Y-%m-%d %H:%M:%S %Z")  # Include timezone info
 
 # === VARIABEL PENAMPUNG ===
 latest_suhu = None
@@ -106,23 +128,26 @@ connect_mqtt()
 # === BACKGROUND TASKS ===
 def save_data_task():
     global latest_suhu
-    logger.info("Starting data save task")
+    logger.info(f"Starting data save task - saving every {DATA_SAVE_INTERVAL//60} minutes")
     
     while True:
         try:
-            time.sleep(60)  # 1 menit
+            time.sleep(DATA_SAVE_INTERVAL)  # 5 menit (300 detik)
             
             with data_lock:
                 current_suhu = latest_suhu
             
             if current_suhu is not None:
+                # Tambahkan offset 30 derajat
+                adjusted_suhu = current_suhu + 30
+                
                 conn = get_db_connection()
                 c = conn.cursor()
-                waktu = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                c.execute("INSERT INTO suhu (waktu, suhu) VALUES (?, ?)", (waktu, current_suhu))
+                waktu = format_indonesia_time()  # Menggunakan waktu Indonesia
+                c.execute("INSERT INTO suhu (waktu, suhu) VALUES (?, ?)", (waktu, adjusted_suhu))
                 conn.commit()
                 conn.close()
-                logger.info(f"Data saved: {waktu} | {current_suhu:.2f}°C")
+                logger.info(f"Data saved: {waktu} | {adjusted_suhu:.2f}°C")
             else:
                 logger.warning("No temperature data received from MQTT")
                 
@@ -160,53 +185,88 @@ def run_async_in_thread(coro):
         loop.close()
 
 def send_excel_task():
-    logger.info("Starting Excel send task")
+    logger.info(f"Starting Excel send task - sending every {EXCEL_SEND_INTERVAL//3600} hours")
     
-    # PERBAIKAN: Wait for initial data
-    time.sleep(120)  # Wait 2 minutes before first run
+    # Wait for initial data (10 minutes to ensure we have some data)
+    initial_wait = 600  # 10 minutes
+    logger.info(f"Waiting {initial_wait//60} minutes for initial data...")
+    time.sleep(initial_wait)
     
     while True:
         try:
             logger.info("Attempting to send Excel report...")
             
-            # PERBAIKAN: Check if bot token and chat_id are valid
+            # Check if bot token and chat_id are valid
             if not TELEGRAM_TOKEN or not CHAT_ID:
                 logger.error("Missing Telegram credentials")
-                time.sleep(3600)
+                time.sleep(EXCEL_SEND_INTERVAL)
                 continue
             
-            # Get data from last hour
-            waktu_awal = (datetime.datetime.now() - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+            # Get data from last 3 hours (in Indonesia time)
+            hours_back = EXCEL_SEND_INTERVAL // 3600  # Convert seconds to hours
+            waktu_awal = (get_indonesia_time() - datetime.timedelta(hours=hours_back)).strftime("%Y-%m-%d %H:%M:%S")
             
             conn = get_db_connection()
             c = conn.cursor()
-            c.execute("SELECT * FROM suhu WHERE waktu >= ? ORDER BY waktu", (waktu_awal,))
+            # Remove timezone from query since database stores without timezone info
+            c.execute("SELECT * FROM suhu WHERE datetime(waktu) >= datetime(?) ORDER BY waktu", (waktu_awal,))
             rows = c.fetchall()
             conn.close()
             
             if not rows:
-                logger.warning("No data to send in Excel report")
-                time.sleep(3600)
+                logger.warning(f"No data to send in Excel report (looking for data since {waktu_awal})")
+                time.sleep(EXCEL_SEND_INTERVAL)
                 continue
 
-            # Create Excel file
+            # Create Excel file with better formatting
             wb = Workbook()
             ws = wb.active
             ws.title = "Data Suhu"
-            ws.append(["ID", "Waktu", "Suhu (°C)"])
             
+            # Header with styling
+            headers = ["ID", "Waktu", "Suhu (°C)"]
+            ws.append(headers)
+            
+            # Make header bold (if openpyxl supports it)
+            try:
+                from openpyxl.styles import Font
+                for col in range(1, len(headers) + 1):
+                    ws.cell(row=1, column=col).font = Font(bold=True)
+            except ImportError:
+                pass  # Skip styling if not available
+            
+            # Add data rows
             for row in rows:
                 ws.append(row)
+            
+            # Auto-adjust column widths
+            try:
+                for column in ws.columns:
+                    max_length = 0
+                    column_letter = column[0].column_letter
+                    for cell in column:
+                        try:
+                            if len(str(cell.value)) > max_length:
+                                max_length = len(str(cell.value))
+                        except:
+                            pass
+                    adjusted_width = min(max_length + 2, 50)
+                    ws.column_dimensions[column_letter].width = adjusted_width
+            except:
+                pass  # Skip if auto-adjust fails
 
-            # PERBAIKAN: Use temp directory and better filename
+            # Use temp directory and better filename
             temp_dir = "/tmp" if os.path.exists("/tmp") else "."
-            filename = os.path.join(temp_dir, f"data_suhu_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx")
+            filename = os.path.join(temp_dir, f"data_suhu_{get_indonesia_time().strftime('%Y%m%d_%H%M')}.xlsx")
             
             wb.save(filename)
             logger.info(f"Excel file created: {filename} with {len(rows)} records")
             
             # Send file using async function
-            caption = f"📊 Data Suhu - {len(rows)} records\n🕐 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            current_time = format_indonesia_time()
+            time_range = f"{hours_back} jam terakhir"
+            caption = f"📊 **Data Suhu - {len(rows)} records**\n🕐 {current_time}\n📅 Data dari {time_range}\n📍 Interval: {DATA_SAVE_INTERVAL//60} menit"
+            
             success = run_async_in_thread(send_telegram_document(filename, caption))
             
             if success:
@@ -224,9 +284,9 @@ def send_excel_task():
         except Exception as e:
             logger.error(f"Error in send_excel_task: {e}")
             
-        # PERBAIKAN: Always wait full hour regardless of success/failure
-        logger.info("Waiting 1 hour for next Excel report...")
-        time.sleep(3600)  # 1 hour
+        # Wait for next cycle
+        logger.info(f"Waiting {EXCEL_SEND_INTERVAL//3600} hours for next Excel report...")
+        time.sleep(EXCEL_SEND_INTERVAL)  # 3 hours
 
 def keepalive_task():
     logger.info("Starting keepalive task")
@@ -241,7 +301,7 @@ def keepalive_task():
         except Exception as e:
             logger.error(f"Keepalive error: {e}")
 
-# PERBAIKAN: Better error handling for threads
+# Better error handling for threads
 def start_background_tasks():
     try:
         threading.Thread(target=save_data_task, daemon=True, name="SaveDataTask").start()
@@ -263,7 +323,16 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return f"🌡️ Temperature Monitor Server<br>Database: {DB_PATH}<br>Status: Running"
+    return f"""
+    🌡️ <b>Temperature Monitor Server</b><br><br>
+    📊 Database: {DB_PATH}<br>
+    ⏱️ Data Save Interval: {DATA_SAVE_INTERVAL//60} minutes<br>
+    📤 Excel Send Interval: {EXCEL_SEND_INTERVAL//3600} hours<br>
+    🌏 Timezone: Asia/Jakarta (WIB)<br>
+    ✅ Status: Running<br><br>
+    <a href="/status">Check Status</a> | 
+    <a href="/test-telegram">Test Telegram</a>
+    """
 
 @app.route("/status")
 def status():
@@ -274,8 +343,14 @@ def status():
         c.execute("SELECT COUNT(*) FROM suhu")
         total = c.fetchone()[0]
         
-        c.execute("SELECT * FROM suhu ORDER BY id DESC LIMIT 1")
-        latest = c.fetchone()
+        c.execute("SELECT * FROM suhu ORDER BY id DESC LIMIT 5")
+        latest_records = c.fetchall()
+        
+        # Get data from last 24 hours for statistics
+        yesterday = (get_indonesia_time() - datetime.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("SELECT AVG(suhu), MIN(suhu), MAX(suhu) FROM suhu WHERE datetime(waktu) >= datetime(?)", (yesterday,))
+        stats = c.fetchone()
+        
         conn.close()
         
         with data_lock:
@@ -285,9 +360,21 @@ def status():
             "status": "running",
             "database_path": DB_PATH,
             "total_records": total,
-            "latest_data": latest,
+            "latest_records": latest_records,
             "latest_mqtt": current_mqtt_data,
-            "timestamp": datetime.datetime.now().isoformat()
+            "statistics_24h": {
+                "average": round(stats[0], 2) if stats[0] else None,
+                "minimum": stats[1],
+                "maximum": stats[2]
+            },
+            "configuration": {
+                "data_save_interval_minutes": DATA_SAVE_INTERVAL // 60,
+                "excel_send_interval_hours": EXCEL_SEND_INTERVAL // 3600,
+                "mqtt_broker": MQTT_BROKER,
+                "mqtt_topic": MQTT_TOPIC
+            },
+            "timestamp": format_indonesia_time(),
+            "timezone": "Asia/Jakarta (WIB)"
         }
     except Exception as e:
         logger.error(f"Status endpoint error: {e}")
@@ -301,24 +388,74 @@ def keepalive():
         
     return {
         "status": "alive", 
-        "timestamp": datetime.datetime.now().isoformat(),
-        "latest_suhu": current_suhu
+        "timestamp": format_indonesia_time(),
+        "latest_suhu": current_suhu,
+        "next_data_save": f"{DATA_SAVE_INTERVAL//60} minutes",
+        "next_excel_send": f"{EXCEL_SEND_INTERVAL//3600} hours"
     }
 
 @app.route("/test-telegram")
 def test_telegram():
     """Test Telegram bot connection"""
     try:
-        message = "🧪 Test message from temperature monitor"
+        current_time = format_indonesia_time()
+        message = f"🧪 **Test Message**\n🕐 {current_time}\n⚙️ Data Save: {DATA_SAVE_INTERVAL//60} min\n📊 Excel Send: {EXCEL_SEND_INTERVAL//3600} hours"
         success = run_async_in_thread(send_telegram_message(message))
         
         if success:
-            return {"status": "success", "message": "Test message sent"}
+            return {"status": "success", "message": "Test message sent", "time": current_time}
         else:
             return {"status": "error", "message": "Failed to send message"}, 500
             
     except Exception as e:
         logger.error(f"Telegram test failed: {e}")
+        return {"error": str(e)}, 500
+
+@app.route("/force-excel")
+def force_excel():
+    """Force send Excel report (for testing)"""
+    try:
+        def send_now():
+            logger.info("Force sending Excel report...")
+            # Get recent data for testing
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("SELECT * FROM suhu ORDER BY id DESC LIMIT 50")
+            rows = c.fetchall()
+            conn.close()
+            
+            if not rows:
+                return False
+                
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Data Suhu (Manual)"
+            ws.append(["ID", "Waktu", "Suhu (°C)"])
+            for row in rows:
+                ws.append(row)
+                
+            temp_dir = "/tmp" if os.path.exists("/tmp") else "."
+            filename = os.path.join(temp_dir, f"test_data_suhu_{get_indonesia_time().strftime('%Y%m%d_%H%M')}.xlsx")
+            wb.save(filename)
+            
+            caption = f"🔧 **Manual Test Report**\n📊 {len(rows)} records\n🕐 {format_indonesia_time()}"
+            success = run_async_in_thread(send_telegram_document(filename, caption))
+            
+            try:
+                os.remove(filename)
+            except:
+                pass
+                
+            return success
+            
+        success = send_now()
+        if success:
+            return {"status": "success", "message": "Excel report sent manually"}
+        else:
+            return {"status": "error", "message": "Failed to send Excel report"}, 500
+            
+    except Exception as e:
+        logger.error(f"Force Excel failed: {e}")
         return {"error": str(e)}, 500
 
 @app.route("/webhook", methods=["POST"])
