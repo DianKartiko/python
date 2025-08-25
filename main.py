@@ -30,6 +30,9 @@ CHAT_ID = os.getenv("CHAT_ID")
 DATA_SAVE_INTERVAL = 60  # SETIAP 1 MENIT (60 DETIK)
 EXCEL_SEND_INTERVAL = 3600  # SETIAP 1 JAM (3600 DETIK)
 
+# KONSISTEN: Parameter offset suhu
+TEMPERATURE_OFFSET = 35  # Tambah 35 derajat untuk semua pembacaan
+
 # === TIMEZONE CONFIGURATION ===
 INDONESIA_TZ = ZoneInfo("Asia/Jakarta")  # WIB (GMT+7)
 # Alternatif timezone Indonesia:
@@ -52,12 +55,19 @@ def format_indonesia_time_simple(dt=None):
         dt = get_indonesia_time()
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
+def apply_temperature_offset(raw_temp):
+    """Apply consistent temperature offset"""
+    if raw_temp is None:
+        return None
+    return raw_temp + TEMPERATURE_OFFSET
+
 # Validasi konfigurasi
 if not all([MQTT_BROKER, MQTT_TOPIC, TELEGRAM_TOKEN, CHAT_ID]):
     logger.error("Missing required environment variables")
     exit(1)
 
 logger.info(f"Config loaded - Broker: {MQTT_BROKER}, Topic: {MQTT_TOPIC}, Chat ID: {CHAT_ID}")
+logger.info(f"Temperature offset: +{TEMPERATURE_OFFSET}°C")
 logger.info(f"Current Indonesia time: {format_indonesia_time()}")
 
 # === DATABASE === 
@@ -91,11 +101,14 @@ data_lock = threading.Lock()  # PERBAIKAN: Thread safety
 def on_message(client, userdata, msg):
     global latest_suhu
     try:
-        suhu = float(msg.payload.decode())
+        raw_suhu = float(msg.payload.decode())
+        adjusted_suhu = apply_temperature_offset(raw_suhu)
+        
         with data_lock:
-            latest_suhu = suhu
-        # Log dengan timezone Indonesia
-        logger.info(f"MQTT Data received: {suhu:.2f}°C (adjusted: {suhu + 30:.2f}°C) at {format_indonesia_time()}")
+            latest_suhu = raw_suhu  # Simpan nilai mentah untuk referensi
+            
+        # Log dengan timezone Indonesia dan nilai yang sudah disesuaikan
+        logger.info(f"MQTT Data received: {raw_suhu:.2f}°C (adjusted: {adjusted_suhu:.2f}°C) at {format_indonesia_time()}")
     except Exception as e:
         logger.error(f"Error parsing MQTT data: {e}")
 
@@ -151,8 +164,8 @@ def save_data_task():
                 current_suhu = latest_suhu
             
             if current_suhu is not None:
-                # PERBAIKAN: Tambahkan offset 30 derajat
-                adjusted_suhu = current_suhu + 30
+                # KONSISTEN: Gunakan fungsi apply_temperature_offset
+                adjusted_suhu = apply_temperature_offset(current_suhu)
                 
                 conn = get_db_connection()
                 c = conn.cursor()
@@ -160,7 +173,7 @@ def save_data_task():
                 c.execute("INSERT INTO suhu (waktu, suhu) VALUES (?, ?)", (waktu, adjusted_suhu))
                 conn.commit()
                 conn.close()
-                logger.info(f"Data saved: {waktu} WIB | {adjusted_suhu:.2f}°C")
+                logger.info(f"Data saved: {waktu} WIB | {adjusted_suhu:.2f}°C (raw: {current_suhu:.2f}°C)")
             else:
                 logger.warning(f"No temperature data received from MQTT at {format_indonesia_time()}")
                 
@@ -249,7 +262,7 @@ def send_excel_task():
             except ImportError:
                 logger.debug("openpyxl styles not available, skipping formatting")
             
-            # Add data rows
+            # Add data rows - suhu sudah ter-offset dari database
             for row in rows:
                 ws.append(row)
             
@@ -278,7 +291,7 @@ def send_excel_task():
             logger.info(f"Excel file created: {filename} with {len(rows)} records")
             
             # Send file using async function with Indonesia time
-            caption = f"📊 **Data Suhu Dryer2- {len(rows)} records**\n🕐 {format_indonesia_time()}\n📅 Data 1 jam terakhir\n🌡️ Interval: {DATA_SAVE_INTERVAL//60} menit"
+            caption = f"📊 **Data Suhu Dryer2 - {len(rows)} records**\n🕐 {format_indonesia_time()}\n📅 Data 1 jam terakhir\n🌡️ Interval: {DATA_SAVE_INTERVAL//60} menit\n⚙️ Offset: +{TEMPERATURE_OFFSET}°C"
             success = run_async_in_thread(send_telegram_document(filename, caption))
             
             if success:
@@ -341,12 +354,17 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
+    with data_lock:
+        current_raw_suhu = latest_suhu
+        current_adjusted_suhu = apply_temperature_offset(current_raw_suhu)
+    
     return f"""
     🌡️ <b>Temperature Monitor Server</b><br><br>
     📊 Database: {DB_PATH}<br>
     ⏰ Current Time: {format_indonesia_time()}<br>
     💾 Save Interval: {DATA_SAVE_INTERVAL} seconds<br>
     📤 Excel Interval: {EXCEL_SEND_INTERVAL} seconds<br>
+    🌡️ Suhu saat ini pada dryer 2: {current_adjusted_suhu:.1f}°C (raw: {current_raw_suhu:.1f}°C)<br>python-internet-of-things-suhu
     🌏 Timezone: Asia/Jakarta (WIB)<br>
     ✅ Status: Running<br><br>
     <a href="/status">📈 Status</a> | 
@@ -364,7 +382,7 @@ def status():
         total = c.fetchone()[0]
         
         c.execute("SELECT * FROM suhu ORDER BY id DESC LIMIT 5")
-        latest_records = c.fetchone()
+        latest_records = c.fetchall()
         
         # PERBAIKAN: Get statistics for last 24 hours
         yesterday = (get_indonesia_time() - datetime.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
@@ -375,18 +393,23 @@ def status():
         
         with data_lock:
             current_mqtt_data = latest_suhu
+            adjusted_mqtt_data = apply_temperature_offset(current_mqtt_data)
         
         return {
             "status": "running",
             "database_path": DB_PATH,
             "total_records": total,
             "latest_records": latest_records,
-            "latest_mqtt": current_mqtt_data,
+            "latest_mqtt": {
+                "raw": current_mqtt_data,
+                "adjusted": adjusted_mqtt_data
+            },
             "statistics_24h": {
                 "average": round(stats[0], 2) if stats[0] else None,
                 "minimum": stats[1],
                 "maximum": stats[2]
             },
+            "temperature_offset": TEMPERATURE_OFFSET,
             "intervals": {
                 "data_save_seconds": DATA_SAVE_INTERVAL,
                 "excel_send_seconds": EXCEL_SEND_INTERVAL
@@ -408,11 +431,16 @@ def keepalive():
     """Endpoint untuk keep container alive"""
     with data_lock:
         current_suhu = latest_suhu
+        adjusted_suhu = apply_temperature_offset(current_suhu)
         
     return {
         "status": "alive", 
         "timestamp": format_indonesia_time(),
-        "latest_suhu": current_suhu,
+        "latest_suhu": {
+            "raw": current_suhu,
+            "adjusted": adjusted_suhu
+        },
+        "temperature_offset": TEMPERATURE_OFFSET,
         "timezone": "WIB",
         "next_save": f"{DATA_SAVE_INTERVAL} seconds",
         "next_excel": f"{EXCEL_SEND_INTERVAL} seconds"
@@ -423,7 +451,11 @@ def test_telegram():
     """Test Telegram bot connection"""
     try:
         current_time = format_indonesia_time()
-        message = f"🧪 **Test Message dari Temperature Monitor**\n🕐 {current_time}\n💾 Save: setiap {DATA_SAVE_INTERVAL} detik\n📊 Excel: setiap {EXCEL_SEND_INTERVAL} detik\n🌡️ Latest: {latest_suhu}°C"
+        with data_lock:
+            raw_temp = latest_suhu
+            adjusted_temp = apply_temperature_offset(raw_temp)
+            
+        message = f"🧪 **Test Message dari Temperature Monitor**\n🕐 {current_time}\n💾 Save: setiap {DATA_SAVE_INTERVAL} detik\n📊 Excel: setiap {EXCEL_SEND_INTERVAL} detik\n🌡️ Latest: {adjusted_temp:.1f}°C (raw: {raw_temp:.1f}°C)\n⚙️ Offset: +{TEMPERATURE_OFFSET}°C"
         success = run_async_in_thread(send_telegram_message(message))
         
         if success:
@@ -460,10 +492,10 @@ def force_excel():
             ws.append(row)
             
         temp_dir = "/tmp" if os.path.exists("/tmp") else "."
-        filename = os.path.join(temp_dir, f"manual_data_suhu_{get_indonesia_time().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        filename = os.path.join(temp_dir, f"manual_data_suhu_dryer2{get_indonesia_time().strftime('%Y%m%d_%H%M%S')}.xlsx")
         wb.save(filename)
         
-        caption = f"🔧 **Manual Excel Report**\n📊 {len(rows)} records\n🕐 {format_indonesia_time()}\n📤 Sent manually"
+        caption = f"🔧 **Manual Excel Report**\n📊 {len(rows)} records\n🕐 {format_indonesia_time()}\n📤 Sent manually\n⚙️ Offset: +{TEMPERATURE_OFFSET}°C"
         success = run_async_in_thread(send_telegram_document(filename, caption))
         
         try:
@@ -489,4 +521,5 @@ def webhook():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     logger.info(f"Starting Flask app on port {port} at {format_indonesia_time()}")
+    logger.info(f"Temperature offset configured: +{TEMPERATURE_OFFSET}°C")
     app.run(host="0.0.0.0", port=port)
