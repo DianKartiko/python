@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, render_template
 import threading
 import sqlite3
 import datetime
@@ -6,7 +6,8 @@ import time
 from zoneinfo import ZoneInfo  # Untuk timezone Indonesia
 import paho.mqtt.client as mqtt
 from openpyxl import Workbook
-import telegram
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, Bot
+from telegram.ext import ContextTypes, ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters
 import asyncio
 from dotenv import load_dotenv
 import os
@@ -31,7 +32,7 @@ DATA_SAVE_INTERVAL = 60  # SETIAP 1 MENIT (60 DETIK)
 EXCEL_SEND_INTERVAL = 3600  # SETIAP 1 JAM (3600 DETIK)
 
 # KONSISTEN: Parameter offset suhu
-TEMPERATURE_OFFSET = 35  # Tambah 35 derajat untuk semua pembacaan
+TEMPERATURE_OFFSET = 20  # Tambah 35 derajat untuk semua pembacaan
 
 # === TIMEZONE CONFIGURATION ===
 INDONESIA_TZ = ZoneInfo("Asia/Jakarta")  # WIB (GMT+7)
@@ -183,7 +184,7 @@ def save_data_task():
 async def send_telegram_message(message):
     """Helper function to send telegram message asynchronously"""
     try:
-        bot = telegram.Bot(token=TELEGRAM_TOKEN)
+        bot = Bot(token=TELEGRAM_TOKEN)
         await bot.send_message(chat_id=CHAT_ID, text=message)
         return True
     except Exception as e:
@@ -193,7 +194,7 @@ async def send_telegram_message(message):
 async def send_telegram_document(file_path, caption):
     """Helper function to send telegram document asynchronously"""
     try:
-        bot = telegram.Bot(token=TELEGRAM_TOKEN)
+        bot = Bot(token=TELEGRAM_TOKEN)
         with open(file_path, "rb") as file:
             await bot.send_document(chat_id=CHAT_ID, document=file, caption=caption)
         return True
@@ -285,7 +286,7 @@ def send_excel_task():
 
             # PERBAIKAN: Use temp directory and better filename with Indonesia time
             temp_dir = "/tmp" if os.path.exists("/tmp") else "."
-            filename = os.path.join(temp_dir, f"data_suhu_dryer2{get_indonesia_time().strftime('%Y%m%d_%H%M')}.xlsx")
+            filename = os.path.join(temp_dir, f"data_suhu_dryer2_{get_indonesia_time().strftime('%Y%m%d_%H%M')}.xlsx")
             
             wb.save(filename)
             logger.info(f"Excel file created: {filename} with {len(rows)} records")
@@ -349,28 +350,134 @@ def start_background_tasks():
 
 start_background_tasks()
 
+# === Adding Command Handler ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start command handler with inline keyboard"""
+    keyboard = [
+        [InlineKeyboardButton("Test Message", callback_data="test")],
+        [InlineKeyboardButton("Data Dryers", callback_data="data")],
+        [InlineKeyboardButton("Force Excel", callback_data="force_excel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "Privasi mode disabled for Suhu @wijaya_suhu",
+        reply_markup=reply_markup
+    )
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button presses"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "test":
+        # Test message functionality
+        current_time = format_indonesia_time()
+        with data_lock:
+            raw_temp = latest_suhu
+            adjusted_temp = apply_temperature_offset(raw_temp)
+            
+        test_message = f"""🧪 Test Message dari Temperature Monitor
+
+🕐 Waktu: {current_time}
+🌡️ Suhu Dryer 2: {adjusted_temp:.1f}°C 
+⚙️ Offset: +{TEMPERATURE_OFFSET}°C
+💾 Save: {DATA_SAVE_INTERVAL} detik
+📊 Excel: {EXCEL_SEND_INTERVAL} detik
+
+✅ Bot berfungsi normal!"""
+
+        await query.edit_message_text(test_message)
+
+    elif query.data == "data":
+        # Show recent data
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("SELECT waktu, suhu FROM suhu ORDER BY id DESC LIMIT 5")
+            recent_data = c.fetchall()
+            conn.close()
+            
+            if recent_data:
+                data_text = "📊 5 Data Terakhir Dryer 2:\n\n"
+                for row in recent_data:
+                    data_text += f"🕐 {row[0]} WIB\n🌡️ {row[1]:.1f}°C\n\n"
+            else:
+                data_text = "❌ Tidak ada data tersedia"
+                
+            await query.edit_message_text(data_text)
+            
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error: {str(e)}")
+
+    elif query.data == "force_excel":
+        # Force Excel generation
+        await query.edit_message_text("📊 Generating Excel... Please wait...")
+        
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("SELECT * FROM suhu ORDER BY id DESC LIMIT 100")
+            rows = c.fetchall()
+            conn.close()
+            
+            if not rows:
+                await query.edit_message_text("❌ No data available")
+                return
+                
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Data Suhu Dryer 2"
+            ws.append(["ID", "Waktu (WIB)", "Suhu (°C)"])
+            
+            for row in rows:
+                ws.append(row)
+                
+            temp_dir = "/tmp" if os.path.exists("/tmp") else "."
+            filename = os.path.join(temp_dir, f"dryer2_suhu_{get_indonesia_time().strftime('%Y%m%d_%H%M')}.xlsx")
+            wb.save(filename)
+            
+            caption = f"📊 Data Suhu Dryer 2 - {len(rows)} records\n🕐 {format_indonesia_time()}\n⚙️ Offset: +{TEMPERATURE_OFFSET}°C"
+            
+            # Send document
+            bot = Bot(token=TELEGRAM_TOKEN)
+            with open(filename, "rb") as file:
+                await bot.send_document(chat_id=query.message.chat_id, document=file, caption=caption)
+            
+            try:
+                os.remove(filename)
+            except:
+                pass
+                
+            await query.edit_message_text(f"✅ Excel sent! {len(rows)} records")
+            
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error: {str(e)}")
+
 # === FLASK APP ===
 app = Flask(__name__)
 
 @app.route("/")
 def index():
+    """Menampilkan halaman utama dengan menggunakan tempalte HTML"""
     with data_lock:
         current_raw_suhu = latest_suhu
-        current_adjusted_suhu = apply_temperature_offset(current_raw_suhu)
-    
-    return f"""
-    🌡️ <b>Temperature Monitor Server</b><br><br>
-    📊 Database: {DB_PATH}<br>
-    ⏰ Current Time: {format_indonesia_time()}<br>
-    💾 Save Interval: {DATA_SAVE_INTERVAL} seconds<br>
-    📤 Excel Interval: {EXCEL_SEND_INTERVAL} seconds<br>
-    🌡️ Suhu saat ini pada dryer 2: {current_adjusted_suhu:.1f}°C (raw: {current_raw_suhu:.1f}°C)<br>python-internet-of-things-suhu
-    🌏 Timezone: Asia/Jakarta (WIB)<br>
-    ✅ Status: Running<br><br>
-    <a href="/status">📈 Status</a> | 
-    <a href="/test-telegram">📱 Test Telegram</a> |
-    <a href="/force-excel">📊 Force Excel</a>
-    """
+
+        if current_raw_suhu is None: 
+            adjusted_suhu_string = "Data Belum Diterima"
+        else:
+            current_adjusted_suhu = apply_temperature_offset(current_raw_suhu)
+            adjusted_suhu_str = f"{current_adjusted_suhu:.1f}"
+        
+    context = {
+        "db_path": DB_PATH,
+        "current_time": format_indonesia_time(),
+        "save_interval": DATA_SAVE_INTERVAL,
+        "excel_interval": EXCEL_SEND_INTERVAL,
+        "current_suhu": adjusted_suhu_str,
+        "timezone": "Asia/Jakarta (WIB)"
+    }
+    return render_template("index.html", **context)
 
 @app.route("/status")
 def status():
@@ -455,7 +562,7 @@ def test_telegram():
             raw_temp = latest_suhu
             adjusted_temp = apply_temperature_offset(raw_temp)
             
-        message = f"🧪 **Test Message dari Temperature Monitor**\n🕐 {current_time}\n💾 Save: setiap {DATA_SAVE_INTERVAL} detik\n📊 Excel: setiap {EXCEL_SEND_INTERVAL} detik\n🌡️ Latest: {adjusted_temp:.1f}°C (raw: {raw_temp:.1f}°C)\n⚙️ Offset: +{TEMPERATURE_OFFSET}°C"
+        message = f"🧪 **Test Message dari Temperature Monitor**\n🕐 {current_time}\n💾 Save: setiap {DATA_SAVE_INTERVAL} detik\n📊 Excel: setiap {EXCEL_SEND_INTERVAL} detik\n🌡️ Latest Suhu Dryer 2: {adjusted_temp:.1f}°C"
         success = run_async_in_thread(send_telegram_message(message))
         
         if success:
@@ -492,7 +599,7 @@ def force_excel():
             ws.append(row)
             
         temp_dir = "/tmp" if os.path.exists("/tmp") else "."
-        filename = os.path.join(temp_dir, f"manual_data_suhu_dryer2{get_indonesia_time().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        filename = os.path.join(temp_dir, f"manual_data_suhu_dryer2_{get_indonesia_time().strftime('%Y%m%d_%H%M%S')}.xlsx")
         wb.save(filename)
         
         caption = f"🔧 **Manual Excel Report**\n📊 {len(rows)} records\n🕐 {format_indonesia_time()}\n📤 Sent manually\n⚙️ Offset: +{TEMPERATURE_OFFSET}°C"
@@ -519,7 +626,21 @@ def webhook():
     return "OK", 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    logger.info(f"Starting Flask app on port {port} at {format_indonesia_time()}")
-    logger.info(f"Temperature offset configured: +{TEMPERATURE_OFFSET}°C")
-    app.run(host="0.0.0.0", port=port)
+    def run_flask():
+        port = int(os.environ.get("PORT", 8080))
+        logger.info(f"Starting Flask app on port {port} at {format_indonesia_time()}")
+        logger.info(f"Temperature offset configured: +{TEMPERATURE_OFFSET}°C")
+        app.run(host="0.0.0.0", port=port)
+
+    flask_thread = threading.Thread(target=run_flask, daemon=True, name="FlaskThread")
+
+    flask_thread.start()
+
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # Dispatcher
+    application.add_handler(MessageHandler(filters.Regex('^Mulai$'), start))
+    application.add_handler(CallbackQueryHandler(button))
+
+    application.run_polling() 
+
