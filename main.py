@@ -1,23 +1,73 @@
+# Flask Requirements
 from flask import Flask, request, render_template
 import threading
+# Database System
 import sqlite3
+# Timezone Requirements
 import datetime
 import time
 from zoneinfo import ZoneInfo  # Untuk timezone Indonesia
+# MQTT Service 
 import paho.mqtt.client as mqtt
-from openpyxl import Workbook
+# Telegram Requirements
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, Bot
 from telegram.ext import ContextTypes, ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters
 import asyncio
+# Operatin System Requirements
 from dotenv import load_dotenv
 import os
+# Logging System
 import logging
+# Excel Requirements
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment
 
 # Setup logging dengan timezone Indonesia
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+# Basic Configuration
+class TemperatureConfig:
+    pass
+
+# Managing Database
+class DatabaeManager:
+    pass
+
+# Handling MQTT Service
+class MQTTService:
+    pass
+
+# Handling Telegram
+class TelegramServie:
+    pass 
+
+# Handling run 2 system
+class BackgroundTask:
+    pass
+
+# For Saving task purpose
+class DataSaveTask:
+    pass
+
+# Sending excel purpose
+class ExcelSendTask:
+    pass
+
+# Checking Server (On/Off)
+class KeepAliveTask:
+    pass
+
+# Tracking in termal
+class MonitorDataTask(BackgroundTask):
+    pass
+
+# Monitoring Temperature in Telegram
+class TemperatureMonitor:
+    pass
+
 
 # === KONFIGURASI ===
 MQTT_BROKER = os.getenv("MQTT_BROKER")
