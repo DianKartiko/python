@@ -1,0 +1,49 @@
+body {
+    /* Warna background utama sesuai permintaan */
+    background-color: #030712;
+    color: #d1d5db;
+    /* Warna teks default yang lebih lembut */
+}
+
+.card {
+    /* Warna kartu yang sedikit lebih terang dari background */
+    background-color: #111827;
+    border: 1px solid #374151;
+}
+
+.card-header {
+    background-color: #1f2937;
+    border-bottom: 1px solid #374151;
+}
+
+.list-group-item {
+    /* Membuat item list transparan agar menyatu dengan kartu */
+    background-color: transparent;
+    border-color: #374151;
+}
+
+/* PERUBAHAN: Style baru untuk teks di dalam list info */
+.list-group-flush .list-group-item span {
+    color: #f3f4f6;
+}
+
+.status-badge {
+    font-size: 1rem;
+}
+
+/* Style untuk kartu suhu dryer */
+.temp-card {
+    background-color: #1f2937;
+    /* Warna yang sama dengan header utama */
+    border-left: 4px solid #0d6efd;
+}
+
+.temp-reading {
+    font-size: 1.75rem;
+    font-weight: bold;
+}
+
+.text-muted {
+    color: #6b7280 !important;
+    /* Warna untuk teks yang tidak terlalu penting */
+}

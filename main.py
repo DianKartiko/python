@@ -28,17 +28,14 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # Interval saving data 
-DATA_SAVE_INTERVAL = 60  # SETIAP 1 MENIT (60 DETIK)
-EXCEL_SEND_INTERVAL = 3600  # SETIAP 1 JAM (3600 DETIK)
+DATA_SAVE_INTERVAL = 600  # SETIAP 10 MENIT (600 DETIK)
+EXCEL_SEND_INTERVAL = 10800  # SETIAP 3 JAM (10800 DETIK)
 
 # KONSISTEN: Parameter offset suhu
-TEMPERATURE_OFFSET = 20  # Tambah 35 derajat untuk semua pembacaan
+TEMPERATURE_OFFSET = 12.6 # Tambah 12.6 derajat untuk semua pembacaan didapat dari hasil linear regresi
 
 # === TIMEZONE CONFIGURATION ===
-INDONESIA_TZ = ZoneInfo("Asia/Jakarta")  # WIB (GMT+7)
-# Alternatif timezone Indonesia:
-# INDONESIA_TZ = ZoneInfo("Asia/Makassar")  # WITA (GMT+8) 
-# INDONESIA_TZ = ZoneInfo("Asia/Jayapura")  # WIT (GMT+9)
+INDONESIA_TZ = ZoneInfo("Asia/Jakarta")
 
 def get_indonesia_time():
     """Get current time in Indonesia timezone"""
@@ -345,9 +342,63 @@ def start_background_tasks():
         keepalive_thread.start()
         logger.info("Keepalive task started")
         
+        # Start monitor task 
+        monitor_thread = threading.Thread(target=monitor_data_task, daemon=True, name="MonitorTask")
+        monitor_thread.start()
+        logger.info("Monitor data task started")
+        
     except Exception as e:
         logger.error(f"Error starting background tasks: {e}")
 
+# Error handling untuk mengirim pesan ke telegram bahwa terdapat error 
+def monitor_data_task():
+    """Monitor apakah data sensor tidak berubah dalam 1 jam, jika ya -> kirim notifikasi ke Telegram"""
+    logger.info("Starting monitor data task - checking every 1 hour")
+    last_notified = None  # Simpan waktu terakhir notifikasi agar tidak spam
+
+    while True:
+        try:
+            time.sleep(3600)  # cek setiap 1 jam
+
+            # Ambil data 1 jam terakhir
+            waktu_awal = (get_indonesia_time() - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("SELECT suhu FROM suhu WHERE datetime(waktu) >= datetime(?) ORDER BY waktu", (waktu_awal,))
+            rows = c.fetchall()
+            conn.close()
+
+            if not rows:
+                logger.warning("Tidak ada data dalam 1 jam terakhir untuk monitoring")
+                continue
+
+            # Cek apakah semua suhu sama
+            unique_values = set([round(r[0], 2) for r in rows if r[0] is not None])
+            if len(unique_values) == 1:
+                current_time = format_indonesia_time()
+                suhu_error = list(unique_values)[0]
+
+                # Hindari spam, kirim maksimal 1 notifikasi per jam
+                if last_notified is None or (get_indonesia_time() - last_notified).seconds >= 3600:
+                    error_message = f"""⚠️ *PERINGATAN SISTEM ERROR* ⚠️
+
+📅 Waktu: {current_time}
+🌡️ Suhu tidak berubah selama 1 jam
+🔢 Nilai tetap: {suhu_error:.2f}°C
+📌 Kemungkinan ESP32/sensor mengalami error"""
+
+                    run_async_in_thread(send_telegram_message(error_message))
+                    last_notified = get_indonesia_time()
+                    logger.warning("Notifikasi error terkirim ke Telegram")
+                else:
+                    logger.info("Error terdeteksi tapi sudah ada notifikasi sebelumnya, tidak dikirim ulang")
+            else:
+                logger.info("Data bervariasi, sistem normal")
+
+        except Exception as e:
+            logger.error(f"Error in monitor_data_task: {e}")
+
+# Menjalankan task dibelakang layar
 start_background_tasks()
 
 # === Adding Command Handler ===
