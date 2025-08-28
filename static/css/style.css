@@ -47,3 +47,70 @@ body {
     color: #6b7280 !important;
     /* Warna untuk teks yang tidak terlalu penting */
 }
+
+.table {
+    color: #d1d5db;
+}
+
+.table-striped>tbody>tr:nth-of-type(odd)>* {
+    --bs-table-accent-bg: rgba(255, 255, 255, 0.05);
+    color: #d1d5db;
+}
+
+.table-hover>tbody>tr:hover>* {
+    --bs-table-accent-bg: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
+.form-control {
+    background-color: #1f2937;
+    border-color: #374151;
+    color: #f3f4f6;
+}
+
+.form-control:focus {
+    border-color: #0d6efd;
+    background-color: #1f2937;
+    color: #f3f4f6;
+    box-shadow: none;
+}
+
+.form-label {
+    color: #d1d5db;
+}
+
+/* --- STYLE BARU UNTUK DATEPICKER KONTRAST TINGGI --- */
+.flatpickr-calendar {
+    border: 1px solid #4b5563;
+}
+
+.flatpickr-day.today {
+    border-color: #3b82f6;
+    /* Biru terang untuk hari ini */
+    color: #eff6ff;
+}
+
+.flatpickr-day.selected,
+.flatpickr-day.startRange,
+.flatpickr-day.endRange {
+    background: #3b82f6;
+    /* Biru terang untuk hari yang dipilih */
+    border-color: #3b82f6;
+    color: #fff;
+}
+
+.flatpickr-months .flatpickr-prev-month:hover svg,
+.flatpickr-months .flatpickr-next-month:hover svg {
+    fill: #3b82f6;
+    /* Warna hover untuk panah navigasi */
+}
+
+.numInputWrapper:hover,
+.numInput:focus {
+    background-color: #374151;
+}
+
+.form-control:disabled,
+.form-control[readonly] {
+    background-color: transparent !important;
+}

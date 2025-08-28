@@ -23,11 +23,22 @@
         filename='css/style.css')}}"
         />
 
+        <!-- Datepicker -->
+        <link
+            rel="stylesheet"
+            href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css"
+        />
+
+        <!-- Flowbite DatePicker Dark Theme -->
+        <link
+            rel="stylesheet"
+            href="https://npmcdn.com/flatpickr/dist/themes/dark.css"
+        />
         <title>Temperature Monitor</title>
     </head>
 
     <body>
-        <div class="container mt-5">
+        <div class="container my-5">
             <div class="row justify-content-center align-items-center">
                 <div class="col-lg-8">
                     <div class="card shadow-sm">
@@ -164,11 +175,95 @@
                                 ><i class="bi bi-send"></i> Force Excel</a
                             >
                         </div>
+
+                        <!-- Bagian data historis -->
+                        <hr style="color: #374151" />
+                        <h5 class="mt-4 mb-3 text-center">
+                            📜 Cari & Download Data Historis
+                        </h5>
+
+                        <!-- Filter Tanggal (Sederhana) -->
+                        <div
+                            class="row g-3 justify-content-center align-items-end my-3 p-3 bg-light-dark rounded-3"
+                        >
+                            <div class="col-md-6">
+                                <label
+                                    for="datePicker"
+                                    class="form-label fw-bold"
+                                    >Pilih Tanggal untuk Menampilkan Data</label
+                                >
+                                <input
+                                    type="text"
+                                    class="form-control"
+                                    id="datePicker"
+                                    placeholder="Klik untuk memilih tanggal..."
+                                />
+                            </div>
+                        </div>
+
+                        <!-- Placeholder untuk Tabel Data -->
+                        <div
+                            id="data-section"
+                            class="mt-4"
+                            style="display: none"
+                        >
+                            <div
+                                class="card-footer text-center d-flex flex-column mb-2 flex-md-row flex-lg-row gap-3 align-items-md-center justify-content-md-between"
+                            >
+                                <h6 id="tableCaption" class="mb-0">
+                                    Menampilkan data...
+                                </h6>
+                                <button
+                                    class="btn btn-success btn-sm"
+                                    type="button"
+                                    id="downloadBtn"
+                                >
+                                    <i class="bi bi-download"></i> Download Data
+                                    Ini
+                                </button>
+                            </div>
+                            <div class="table-responsive">
+                                <table class="table table-striped table-hover">
+                                    <thead class="table-dark">
+                                        <tr>
+                                            <th>Waktu (WIB)</th>
+                                            <th>Dryer 1 (°C)</th>
+                                            <th>Dryer 2 (°C)</th>
+                                            <th>Dryer 3 (°C)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="dataTableBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div
+                            id="loadingIndicator"
+                            class="text-center mt-4"
+                            style="display: none"
+                        >
+                            <div
+                                class="spinner-border text-primary"
+                                role="status"
+                            >
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <p class="mt-2">Memuat data...</p>
+                        </div>
+                        <p
+                            id="noDataMessage"
+                            class="text-center text-muted mt-4"
+                            style="display: none"
+                        >
+                            Tidak ada data untuk tanggal yang dipilih.
+                        </p>
                     </div>
                 </div>
             </div>
         </div>
 
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+        <script src="{{url_for('static', filename='js/index.js')}}"></script>
     </body>
 </html>
