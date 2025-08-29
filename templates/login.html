@@ -1,0 +1,78 @@
+{%extends "base/base.html"%}
+<!-- Style -->
+{%block style%}
+<link
+    rel="stylesheet"
+    href="{{url_for('static',
+        filename='css/login.css')}}"
+/>
+{%endblock%}
+
+<!-- Login page -->
+{% block content %}
+<div class="container">
+    <div
+        class="row justify-content-center align-items-center"
+        style="height: 100vh"
+    >
+        <div class="col-md-5">
+            <div class="card login-card shadow">
+                <div class="card-body p-4">
+                    <h3 class="card-title text-center mb-4">
+                        Login Monitoring Suhu
+                    </h3>
+
+                    {% with messages =
+                    get_flashed_messages(with_categories=true) %} {% if messages
+                    %} {% for category, message in messages %}
+                    <div
+                        class="alert alert-{{ category }} alert-dismissible fade show"
+                        role="alert"
+                    >
+                        {{ message }}
+                        <button
+                            type="button"
+                            class="btn-close"
+                            data-bs-dismiss="alert"
+                            aria-label="Close"
+                        ></button>
+                    </div>
+                    {% endfor %} {% endif %} {% endwith %}
+
+                    <form method="POST" action="{{ url_for('login') }}">
+                        <div class="mb-3">
+                            <label for="username" class="form-label"
+                                >Username</label
+                            >
+                            <input
+                                type="text"
+                                class="form-control"
+                                id="username"
+                                name="username"
+                                required
+                            />
+                        </div>
+                        <div class="mb-3">
+                            <label for="password" class="form-label"
+                                >Password</label
+                            >
+                            <input
+                                type="password"
+                                class="form-control"
+                                id="password"
+                                name="password"
+                                required
+                            />
+                        </div>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-primary">
+                                Login
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{%endblock%}

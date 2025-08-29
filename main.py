@@ -1,5 +1,8 @@
 # Flask Requirements
-from flask import Flask, request, render_template
+from flask import Flask, request, render_template, jsonify, Response, redirect, url_for, flash
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
+# Threading and Request
 import threading
 import requests
 # Database System
@@ -22,12 +25,23 @@ import logging
 # Excel Requirements
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
+# Untuk Input dan Output
+from queue import Queue, Empty
+from io import BytesIO
 
 # Setup logging dengan timezone Indonesia
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+# --- LOGIN SYSTEM: User Class ---
+class User(UserMixin):
+    def __init__(self, id, username, password):
+        self.id = id
+        self.username = username
+        self.password = password
+# ------------------------------
 
 # Basic Configuration
 class TemperatureMonitorConfig:
@@ -36,28 +50,28 @@ class TemperatureMonitorConfig:
     def __init__(self):
         self.MQTT_BROKER = os.getenv("MQTT_BROKER")
         self.MQTT_PORT = 1883
-        self.MQTT_TOPIC = os.getenv("MQTT_TOPIC")
+        self.MQTT_TOPICS = {
+            "dryer1": os.getenv("MQTT_TOPIC_1"),
+            "dryer2": os.getenv("MQTT_TOPIC_2"),
+            "dryer3": os.getenv("MQTT_TOPIC_3"),
+        }
         self.TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
         self.CHAT_ID = os.getenv("CHAT_ID")
-        self.DATA_SAVE_INTERVAL = 600
-        self.EXCEL_SEND_INTERVAL = 10800
         self.TEMPERATURE_OFFSET = 12.6
         self.INDONESIA_TZ = ZoneInfo("Asia/Jakarta")
         self.MIN_TEMP_ALERT = float(120)
         self.MAX_TEMP_ALERT = float(155)
-        self.DB_PATH = "/data/data_suhu.db" if os.path.exists("/data") else "data_suhu.db"
+        self.DB_PATH = "/data/data_suhu_multi.db" if os.path.exists("/data") else "data_suhu_multi.db"
         
         self.validate()
         
     def validate(self):
         """Validasi konfigurasi yang diperlukan"""
-        if not all([self.MQTT_BROKER, self.MQTT_TOPIC, self.TELEGRAM_TOKEN, self.CHAT_ID]):
+        if not all([self.MQTT_BROKER, self.TELEGRAM_TOKEN, self.CHAT_ID]):
             logger.error("Missing required environment variables")
             exit(1)
             
-        logger.info(f"Config loaded - Broker: {self.MQTT_BROKER}, Topic: {self.MQTT_TOPIC}")
-        logger.info(f"Temperature offset: +{self.TEMPERATURE_OFFSET}°C")
-        logger.info(f"Current Indonesia time: {self.format_indonesia_time()}")
+        logger.info(f"Config loaded - Broker: {self.MQTT_BROKER}")
 
     def get_indonesia_time(self):
         """Get current time in Indonesia timezone"""
@@ -82,26 +96,33 @@ class TemperatureMonitorConfig:
         return raw_temp + self.TEMPERATURE_OFFSET
 
 class DatabaseManager:
-    """Class untuk mengelola operasi database"""
+    """Class untuk mengelola operasi database untuk multi-dryer"""
     
     def __init__(self, db_path):
         self.db_path = db_path
         self.initialize_database()
         
     def initialize_database(self):
-        """Initialize database dengan table yang diperlukan"""
-        conn = self.get_connection()
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS suhu (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                waktu TEXT,
-                suhu REAL
-            )
-        """)
-        conn.commit()
-        conn.close()
-        logger.info(f"Database initialized at: {self.db_path}")
+        """Initialize database dengan table yang bisa menyimpan ID dryer"""
+        with self.get_connection() as conn:
+            c = conn.cursor()
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS suhu (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    waktu TEXT,
+                    dryer_id TEXT, 
+                    suhu REAL
+                )
+            """)
+            # --- LOGIN SYSTEM: Create users table ---
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL
+                )
+            """)
+            # ----------------------------------------
+            
+        logger.info(f"Database multi-dryer initialized at: {self.db_path}")
     
     def get_connection(self):
         """Mendapatkan koneksi database yang thread-safe"""
@@ -109,57 +130,113 @@ class DatabaseManager:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
     
-    def insert_temperature(self, waktu, suhu):
-        """Insert data suhu ke database"""
+    # --- LOGIN SYSTEM: Methods for user management ---
+    def get_user_by_username(self, username):
         try:
-            conn = self.get_connection()
-            c = conn.cursor()
-            c.execute("INSERT INTO suhu (waktu, suhu) VALUES (?, ?)", (waktu, suhu))
-            conn.commit()
-            conn.close()
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("SELECT * FROM users WHERE username = ?", (username,))
+                user_data = c.fetchone()
+                if user_data:
+                    return User(id=user_data[0], username=user_data[1], password=user_data[2])
+            return None
+        except Exception as e:
+            logger.error(f"Error getting user by username: {e}")
+            return None
+
+    def get_user_by_id(self, user_id):
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+                user_data = c.fetchone()
+                if user_data:
+                    return User(id=user_data[0], username=user_data[1], password=user_data[2])
+            return None
+        except Exception as e:
+            logger.error(f"Error getting user by ID: {e}")
+            return None
+    
+    def create_initial_user(self, username, password):
+        """Membuat user awal jika belum ada, menggunakan Fly secrets."""
+        if not self.get_user_by_username(username):
+            logger.info(f"User '{username}' tidak ditemukan, mencoba membuat user baru...")
+            try:
+                with self.get_connection() as conn:
+                    c = conn.cursor()
+                    hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
+                    c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_password))
+                    conn.commit()
+                    logger.info(f"User '{username}' berhasil dibuat dari environment secrets.")
+            except Exception as e:
+                logger.error(f"Gagal membuat initial user: {e}")
+    # -----------------------------------------------
+    
+    def insert_temperature(self, waktu, dryer_id, suhu):
+        """Insert data suhu ke database dengan menyertakan ID dryer"""
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("INSERT INTO suhu (waktu, dryer_id, suhu) VALUES (?, ?, ?)", (waktu, dryer_id, suhu))
             return True
         except Exception as e:
             logger.error(f"Error inserting temperature: {e}")
             return False
     
-    def get_recent_data(self, limit=5):
-        """Mendapatkan data terbaru dari database"""
+    def get_data_by_date_pivoted(self, date_str, latest_only=False):
+        """
+        Mendapatkan data untuk tanggal tertentu.
+        Jika latest_only=True, hanya mengembalikan 1 baris data terbaru.
+        """
         try:
-            conn = self.get_connection()
-            c = conn.cursor()
-            c.execute("SELECT * FROM suhu ORDER BY id DESC LIMIT ?", (limit,))
-            result = c.fetchall()
-            conn.close()
-            return result
+            start_time = f"{date_str} 00:00:00"
+            end_time = f"{date_str} 23:59:59"
+            
+            sql = """
+            SELECT
+                strftime('%Y-%m-%d %H:%M:%S', waktu) as timestamp,
+                MAX(CASE WHEN dryer_id = 'dryer1' THEN suhu END) as dryer1_suhu,
+                MAX(CASE WHEN dryer_id = 'dryer2' THEN suhu END) as dryer2_suhu,
+                MAX(CASE WHEN dryer_id = 'dryer3' THEN suhu END) as dryer3_suhu
+            FROM suhu
+            WHERE waktu BETWEEN ? AND ?
+            GROUP BY timestamp
+            """
+            
+            if latest_only:
+                sql += " ORDER BY timestamp DESC LIMIT 1"
+            else:
+                sql += " ORDER BY timestamp ASC"
+
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute(sql, (start_time, end_time))
+                return c.fetchall()
         except Exception as e:
-            logger.error(f"Error getting recent data: {e}")
+            logger.error(f"Error getting pivoted data for date {date_str}: {e}")
             return []
-    
+            
     def get_data_since(self, since_time):
         """Mendapatkan data sejak waktu tertentu"""
         try:
-            conn = self.get_connection()
-            c = conn.cursor()
-            c.execute("SELECT * FROM suhu WHERE datetime(waktu) >= datetime(?) ORDER BY waktu", (since_time,))
-            result = c.fetchall()
-            conn.close()
-            return result
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("SELECT * FROM suhu WHERE datetime(waktu) >= datetime(?) ORDER BY waktu", (since_time,))
+                return c.fetchall()
         except Exception as e:
             logger.error(f"Error getting data since {since_time}: {e}")
             return []
     
-    def get_statistics(self, since_time):
-        """Mendapatkan statistik data"""
+    def get_recent_data(self, limit=5):
+        """Mendapatkan data terbaru (untuk handler Telegram)"""
         try:
-            conn = self.get_connection()
-            c = conn.cursor()
-            c.execute("SELECT AVG(suhu), MIN(suhu), MAX(suhu) FROM suhu WHERE datetime(waktu) >= datetime(?)", (since_time,))
-            result = c.fetchone()
-            conn.close()
-            return result
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("SELECT waktu, dryer_id, suhu FROM suhu ORDER BY id DESC LIMIT ?", (limit,))
+                return c.fetchall()
         except Exception as e:
-            logger.error(f"Error getting statistics: {e}")
-            return (None, None, None)
+            logger.error(f"Error getting recent data: {e}")
+            return []
 
 class MQTTService:
     """Class untuk mengelola koneksi dan komunikasi MQTT"""
@@ -182,8 +259,9 @@ class MQTTService:
         if rc == 0:
             self.is_connected = True
             logger.info(f"MQTT Connected successfully at {self.config.format_indonesia_time()}")
-            self.client.subscribe(self.config.MQTT_TOPIC)
-            logger.info(f"Subscribed to topic: {self.config.MQTT_TOPIC}")
+            for topic in self.config.MQTT_TOPICS.values():
+                if topic: self.client.subscribe(topic)
+            logger.info(f"Subscribed to topics: {self.config.MQTT_TOPICS}")
         else:
             logger.error(f"MQTT Connection failed with code {rc}")
     
@@ -192,7 +270,7 @@ class MQTTService:
         try:
             raw_suhu = float(msg.payload.decode())
             if self.data_callback:
-                self.data_callback(raw_suhu)
+                self.data_callback(raw_suhu, msg.topic)
         except Exception as e:
             logger.error(f"Error parsing MQTT data: {e}")
     
@@ -202,21 +280,15 @@ class MQTTService:
         logger.warning(f"MQTT Disconnected with code {rc} at {self.config.format_indonesia_time()}")
     
     def connect(self):
-        """Connect ke MQTT broker dengan retry mechanism"""
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                self.client.connect(self.config.MQTT_BROKER, self.config.MQTT_PORT, 60)
-                self.client.loop_start()
-                logger.info("MQTT Client started")
-                return True
-            except Exception as e:
-                logger.error(f"MQTT Connection attempt {attempt + 1} failed: {e}")
-                if attempt < max_retries - 1:
-                    logger.info(f"Retrying MQTT connection in 10 seconds...")
-                    time.sleep(10)
-        logger.error("Failed to connect to MQTT after all retries")
-        return False
+        """Connect ke MQTT broker"""
+        try:
+            self.client.connect(self.config.MQTT_BROKER, self.config.MQTT_PORT, 60)
+            self.client.loop_start()
+            logger.info("MQTT Client started")
+            return True
+        except Exception as e:
+            logger.error(f"MQTT Connection failed: {e}")
+            return False
     
     def disconnect(self):
         """Disconnect dari MQTT broker"""
@@ -224,47 +296,83 @@ class MQTTService:
         self.client.disconnect()
 
 class TelegramService:
-    """Class untuk mengelola komunikasi Telegram"""
-    
+    """Class untuk mengelola komunikasi Telegram dengan antrean dan worker."""
     def __init__(self, config, db_manager):
         self.config = config
         self.db_manager = db_manager
-        self.bot = Bot(token=config.TELEGRAM_TOKEN) if config.TELEGRAM_TOKEN else None
-        self.application = None
-        self.setup_bot()
-        
-    def setup_bot(self):
-        """Setup Telegram bot dengan handlers"""
-        if self.config.TELEGRAM_TOKEN:
-            self.application = ApplicationBuilder().token(self.config.TELEGRAM_TOKEN).build()
-            self._setup_handlers()
-        else:
-            logger.warning("Telegram token not configured")
-    
+        self.bot = Bot(token=config.TELEGRAM_TOKEN)
+        self.application = ApplicationBuilder().token(self.config.TELEGRAM_TOKEN).build()
+        self._setup_handlers()
+        self.message_queue = Queue()
+        self.worker_thread = None
+        self.is_worker_running = False
+
     def _setup_handlers(self):
-        """Setup handlers untuk Telegram bot"""
         self.application.add_handler(MessageHandler(filters.Regex('^Mulai$'), self.start))
         self.application.add_handler(CallbackQueryHandler(self.button))
+
+    async def _send_message_async(self, message):
+        try:
+            await self.bot.send_message(chat_id=self.config.CHAT_ID, text=message, parse_mode="Markdown")
+            logger.info("Pesan Telegram berhasil dikirim dari worker.")
+        except Exception as e:
+            logger.error(f"Gagal mengirim pesan dari worker: {e}")
+
+    async def _send_document_async(self, file_path, caption):
+        try:
+            with open(file_path, "rb") as file:
+                await self.bot.send_document(chat_id=self.config.CHAT_ID, document=file, caption=caption, parse_mode="Markdown")
+            logger.info(f"Dokumen {file_path} berhasil dikirim dari worker.")
+        except Exception as e:
+            logger.error(f"Gagal mengirim dokumen dari worker: {e}")
+
+    def _process_queue(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        while self.is_worker_running:
+            try:
+                task_type, *args = self.message_queue.get(timeout=1) 
+                if task_type == 'message':
+                    loop.run_until_complete(self._send_message_async(args[0]))
+                elif task_type == 'document':
+                    loop.run_until_complete(self._send_document_async(args[0], args[1]))
+                self.message_queue.task_done()
+            except Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Error di dalam Telegram worker thread: {e}")
+
+    def start_worker(self):
+        if not self.is_worker_running:
+            self.is_worker_running = True
+            self.worker_thread = threading.Thread(target=self._process_queue, daemon=True, name="TelegramWorker")
+            self.worker_thread.start()
+            logger.info("Telegram worker thread dimulai.")
+
+    def stop_worker(self):
+        self.is_worker_running = False
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5)
+            logger.info("Telegram worker thread dihentikan.")
+
+    def send_message(self, message):
+        self.message_queue.put(('message', message))
+
+    def send_document(self, file_path, caption):
+        self.message_queue.put(('document', file_path, caption))
     
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler untuk command /start"""
+    async def start(self, update, context):
         keyboard = [
             [InlineKeyboardButton("Test Message", callback_data="test")],
             [InlineKeyboardButton("Data Dryers", callback_data="data")],
             [InlineKeyboardButton("Force Excel", callback_data="force_excel")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update.message.reply_text(
-            "Privasi mode disabled for Suhu @wijaya_suhu",
-            reply_markup=reply_markup
-        )
+        await update.message.reply_text("Pilih opsi:", reply_markup=reply_markup)
     
-    async def button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler untuk inline keyboard buttons"""
+    async def button(self, update, context):
         query = update.callback_query
         await query.answer()
-
         if query.data == "test":
             await self._handle_test(query)
         elif query.data == "data":
@@ -273,595 +381,307 @@ class TelegramService:
             await self._handle_force_excel(query)
     
     async def _handle_test(self, query):
-        """Handler untuk test message"""
         current_time = self.config.format_indonesia_time()
-        test_message = f"""🧪 Test Message dari Temperature Monitor
-
-🕐 Waktu: {current_time}
-⚙️ Offset: +{self.config.TEMPERATURE_OFFSET}°C
-💾 Save: {self.config.DATA_SAVE_INTERVAL} detik
-📊 Excel: {self.config.EXCEL_SEND_INTERVAL} detik
-
-✅ Bot berfungsi normal!"""
-
+        test_message = f"🧪 Test Message\n🕐 Waktu: {current_time}\n✅ Bot berfungsi normal!"
         await query.edit_message_text(test_message)
     
     async def _handle_data(self, query):
-        """Handler untuk menampilkan data"""
         recent_data = self.db_manager.get_recent_data(5)
-        
         if recent_data:
-            data_text = "📊 5 Data Terakhir Dryer 2:\n\n"
+            data_text = "📊 5 Data Terakhir:\n\n"
             for row in recent_data:
-                data_text += f"🕐 {row[1]} WIB\n🌡️ {row[2]:.1f}°C\n\n"
+                data_text += f"*{row[1].upper()}*:\n🕐 {row[0]} WIB\n🌡️ {row[2]:.1f}°C\n\n"
         else:
             data_text = "❌ Tidak ada data tersedia"
-            
         await query.edit_message_text(data_text)
     
     async def _handle_force_excel(self, query):
-        """Handler untuk force excel generation"""
         await query.edit_message_text("📊 Generating Excel... Please wait...")
-        
-        try:
-            rows = self.db_manager.get_recent_data(100)
-            
-            if not rows:
-                await query.edit_message_text("❌ No data available")
-                return
-                
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Data Suhu Dryer 2"
-            ws.append(["ID", "Waktu (WIB)", "Suhu (°C)"])
-            
-            for row in rows:
-                ws.append(row)
-                
-            temp_dir = "/tmp" if os.path.exists("/tmp") else "."
-            filename = os.path.join(temp_dir, f"dryer2_suhu_{self.config.get_indonesia_time().strftime('%Y%m%d_%H%M')}.xlsx")
-            wb.save(filename)
-            
-            caption = f"📊 Data Suhu Dryer 2 - {len(rows)} records\n🕐 {self.config.format_indonesia_time()}\n⚙️ Offset: +{self.config.TEMPERATURE_OFFSET}°C"
-            
-            # Send document
-            with open(filename, "rb") as file:
-                await self.bot.send_document(chat_id=query.message.chat_id, document=file, caption=caption)
-            
-            try:
-                os.remove(filename)
-            except:
-                pass
-                
-            await query.edit_message_text(f"✅ Excel sent! {len(rows)} records")
-            
-        except Exception as e:
-            await query.edit_message_text(f"❌ Error: {str(e)}")
-    
-    async def send_message(self, message):
-        """Mengirim message ke Telegram"""
-        try:
-            await self.bot.send_message(chat_id=self.config.CHAT_ID, text=message)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send telegram message: {e}")
-            return False
-    
-    async def send_document(self, file_path, caption):
-        """Mengirim document ke Telegram"""
-        try:
-            with open(file_path, "rb") as file:
-                await self.bot.send_document(chat_id=self.config.CHAT_ID, document=file, caption=caption)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send telegram document: {e}")
-            return False
+        today_str = self.config.get_indonesia_time().strftime('%Y-%m-%d')
+        rows = self.db_manager.get_data_by_date_pivoted(today_str)
+        if not rows:
+            await query.edit_message_text("❌ No data available for today.")
+            return
+        wb = Workbook()
+        ws = wb.active
+        ws.title = f"Data Suhu {today_str}"
+        ws.append(["Waktu (WIB)", "Dryer 1 (°C)", "Dryer 2 (°C)", "Dryer 3 (°C)"])
+        for row in rows: ws.append(list(row))
+        temp_dir = "/tmp" if os.path.exists("/tmp") else "."
+        filename = os.path.join(temp_dir, f"manual_report_{today_str}.xlsx")
+        wb.save(filename)
+        caption = f"📊 Laporan Manual - {today_str}"
+        with open(filename, "rb") as file:
+            await self.bot.send_document(chat_id=query.message.chat_id, document=file, caption=caption)
+        try: os.remove(filename)
+        except: pass
+        await query.edit_message_text(f"✅ Excel sent! {len(rows)} records")
     
     def start_polling(self):
-        """Memulai Telegram bot polling"""
         if self.application:
             self.application.run_polling()
 
 class BackgroundTask:
-    """Base class untuk background tasks"""
-    
     def __init__(self, interval, name="BackgroundTask"):
         self.interval = interval
         self.name = name
         self.thread = None
         self.is_running = False
-    
     def task(self):
-        """Method yang harus diimplementasikan oleh subclass"""
-        raise NotImplementedError("Subclasses must implement this method")
-    
+        raise NotImplementedError
     def run(self):
-        """Main execution loop untuk background task"""
         self.is_running = True
-        logger.info(f"Starting {self.name} - running every {self.interval} seconds")
-        
         while self.is_running:
             try:
-                self.task()
+                if self.is_running: self.task()
             except Exception as e:
                 logger.error(f"Error in {self.name}: {e}")
-            time.sleep(self.interval)
-    
+            if self.interval > 0:
+                time.sleep(self.interval)
     def start(self):
-        """Memulai background task"""
         self.thread = threading.Thread(target=self.run, daemon=True, name=self.name)
         self.thread.start()
-        logger.info(f"{self.name} started")
-    
     def stop(self):
-        """Menghentikan background task"""
         self.is_running = False
-        if self.thread:
-            self.thread.join(timeout=5)
-            logger.info(f"{self.name} stopped")
+        if self.thread: self.thread.join(timeout=5)
 
-class DataSaveTask(BackgroundTask):
-    """Task untuk menyimpan data ke database"""
-    
-    def __init__(self, config, data_provider, db_manager):
-        super().__init__(config.DATA_SAVE_INTERVAL, "DataSaveTask")
-        self.config = config
-        self.data_provider = data_provider
-        self.db_manager = db_manager
-    
-    def task(self):
-        """Menyimpan data suhu ke database"""
-        current_suhu = self.data_provider.get_latest_temperature()
-        if current_suhu is not None:
-            adjusted_suhu = self.config.apply_temperature_offset(current_suhu)
-            waktu = self.config.format_indonesia_time_simple()
-            success = self.db_manager.insert_temperature(waktu, adjusted_suhu)
-            if success:
-                logger.info(f"Data saved: {waktu} WIB | {adjusted_suhu:.2f}°C (raw: {current_suhu:.2f}°C)")
-            else:
-                logger.error("Failed to save data to database")
-        else:
-            logger.warning(f"No temperature data received from MQTT at {self.config.format_indonesia_time()}")
-
-class ExcelSendTask(BackgroundTask):
-    """Task untuk mengirim laporan Excel"""
-    
+class DailyExcelReportTask(BackgroundTask):
     def __init__(self, config, db_manager, telegram_service):
-        super().__init__(config.EXCEL_SEND_INTERVAL, "ExcelSendTask")
+        super().__init__(-1, "DailyExcelReportTask")
         self.config = config
         self.db_manager = db_manager
         self.telegram_service = telegram_service
-    
+    def run(self):
+        self.is_running = True
+        logger.info(f"Starting {self.name}. Laporan akan dikirim setiap pukul 00:00.")
+        while self.is_running:
+            try:
+                now = self.config.get_indonesia_time()
+                tomorrow = now + datetime.timedelta(days=1)
+                midnight = tomorrow.replace(hour=0, minute=0, second=5, microsecond=0)
+                seconds_to_wait = (midnight - now).total_seconds()
+                logger.info(f"Laporan harian berikutnya dalam {seconds_to_wait / 3600:.2f} jam.")
+                sleep_end_time = time.time() + seconds_to_wait
+                while time.time() < sleep_end_time and self.is_running:
+                    time.sleep(1)
+                if self.is_running: self.task()
+            except Exception as e:
+                logger.error(f"Error di dalam loop {self.name}: {e}")
+                time.sleep(300)
     def task(self):
-        """Mengirim laporan Excel ke Telegram"""
-        current_time = self.config.format_indonesia_time()
-        logger.info(f"Attempting to send Excel report at {current_time}")
-        
-        if not self.config.TELEGRAM_TOKEN or not self.config.CHAT_ID:
-            logger.error("Missing Telegram credentials")
-            return
-        
-        # Get data from last hour
-        waktu_awal = (self.config.get_indonesia_time() - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-        rows = self.db_manager.get_data_since(waktu_awal)
-        
+        yesterday = (self.config.get_indonesia_time() - datetime.timedelta(days=1))
+        yesterday_str = yesterday.strftime('%Y-%m-%d')
+        logger.info(f"Memulai pembuatan laporan Excel untuk tanggal: {yesterday_str}")
+        rows = self.db_manager.get_data_by_date_pivoted(yesterday_str)
         if not rows:
-            logger.warning(f"No data to send in Excel report (looking since {waktu_awal} WIB)")
+            logger.warning(f"Tidak ada data untuk dilaporkan pada tanggal {yesterday_str}.")
             return
-
-        # Create Excel file
         wb = Workbook()
         ws = wb.active
-        ws.title = "Data Suhu"
-        
-        headers = ["ID", "Waktu (WIB)", "Suhu (°C)"]
-        ws.append(headers)
-        
-        # Style headers
-        try:
-            for col in range(1, len(headers) + 1):
-                cell = ws.cell(row=1, column=col)
-                cell.font = Font(bold=True)
-                cell.alignment = Alignment(horizontal='center')
-        except Exception as e:
-            logger.debug(f"Could not style Excel headers: {e}")
-        
-        # Add data rows
-        for row in rows:
-            ws.append(row)
-        
-        # Auto-adjust column widths
-        try:
-            for column in ws.columns:
-                max_length = 0
-                column_letter = column[0].column_letter
-                for cell in column:
-                    try:
-                        cell_length = len(str(cell.value))
-                        if cell_length > max_length:
-                            max_length = cell_length
-                    except:
-                        pass
-                adjusted_width = min(max_length + 2, 30)
-                ws.column_dimensions[column_letter].width = adjusted_width
-        except Exception as e:
-            logger.debug(f"Could not adjust column widths: {e}")
-
-        # Save file
+        ws.title = f"Data Suhu {yesterday_str}"
+        ws.append(["Waktu (WIB)", "Dryer 1 (°C)", "Dryer 2 (°C)", "Dryer 3 (°C)"])
+        for row in rows: ws.append(list(row))
         temp_dir = "/tmp" if os.path.exists("/tmp") else "."
-        filename = os.path.join(temp_dir, f"data_suhu_dryer2_{self.config.get_indonesia_time().strftime('%Y%m%d_%H%M')}.xlsx")
+        filename = os.path.join(temp_dir, f"laporan_harian_{yesterday_str}.xlsx")
         wb.save(filename)
-        logger.info(f"Excel file created: {filename} with {len(rows)} records")
-        
-        # Send file
-        caption = f"📊 **Data Suhu Dryer2 - {len(rows)} records**\n🕐 {self.config.format_indonesia_time()}\n📅 Data 1 jam terakhir\n🌡️ Interval: {self.config.DATA_SAVE_INTERVAL//60} menit\n⚙️ Offset: +{self.config.TEMPERATURE_OFFSET}°C"
-        
-        # Run async function in thread
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            success = loop.run_until_complete(self.telegram_service.send_document(filename, caption))
-            loop.close()
-            
-            if success:
-                logger.info(f"Excel file sent successfully: {filename}")
-            else:
-                logger.error(f"Failed to send Excel file: {filename}")
-        except Exception as e:
-            logger.error(f"Error sending Excel file: {e}")
-        
-        # Clean up
-        try:
-            os.remove(filename)
-            logger.info(f"Temporary file deleted: {filename}")
-        except OSError as e:
-            logger.warning(f"Could not delete temporary file: {e}")
+        caption = f"📊 *Laporan Harian Suhu - {yesterday.strftime('%d %B %Y')}*"
+        self.telegram_service.send_document(filename, caption)
+        time.sleep(10)
+        try: os.remove(filename)
+        except OSError: pass
 
 class KeepaliveTask(BackgroundTask):
-    """Task untuk menjaga aplikasi tetap aktif"""
-    
     def __init__(self, config):
-        super().__init__(1800, "KeepaliveTask")  # 30 minutes
+        super().__init__(1800, "KeepaliveTask")
         self.config = config
-    
     def task(self):
-        """Mengirim ping untuk menjaga aplikasi tetap aktif"""
         app_url = os.getenv("FLY_APP_NAME", "")
         if app_url:
             try:
-                response = requests.get(f"https://{app_url}.fly.dev/keepalive", timeout=10)
-                logger.info(f"Self-ping sent at {self.config.format_indonesia_time()}, status: {response.status_code}")
+                requests.get(f"https://{app_url}.fly.dev/keepalive", timeout=10)
             except Exception as e:
                 logger.error(f"Keepalive error: {e}")
 
 class MonitorDataTask(BackgroundTask):
-    """Task untuk memantau konsistensi data"""
-    
     def __init__(self, config, db_manager, telegram_service):
-        super().__init__(3600, "MonitorDataTask")  # 1 hour
+        super().__init__(3600, "MonitorDataTask")
         self.config = config
         self.db_manager = db_manager
         self.telegram_service = telegram_service
         self.is_error_notified = False
-    
     def task(self):
-        """Memantau data dan mengirim notifikasi jika ada error"""
-        # Ambil data 1 jam terakhir
         waktu_awal = (self.config.get_indonesia_time() - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
         rows = self.db_manager.get_data_since(waktu_awal)
-
-        if not rows:
-            logger.warning("Tidak ada data dalam 1 jam terakhir untuk monitoring")
-            return
-
-        # Cek apakah semua suhu sama
-        unique_values = set([round(row[2], 2) for row in rows if len(row) > 2 and row[2] is not None])
-        
-        # Kondisi Error Pertama
+        if not rows: return
+        unique_values = set([round(row[3], 2) for row in rows if len(row) > 3 and row[3] is not None])
         if len(unique_values) == 1:
-            # --- Kondisi jika terjadi error dan notif apakah sudah pernah dikirim
             if not self.is_error_notified:
-                current_time = self.config.format_indonesia_time()
                 suhu_error = list(unique_values)[0]
-                
-                logger.warning(f"Sistem error terdeteksi (suhu macet di {suhu_error}°C). Mengirim notifikasi.")
-                error_message = (f"⚠️ *PERINGATAN SISTEM ERROR* ⚠️\n\n"
-                                f"📅 Waktu: {current_time}\n"
-                                f"🌡️ Suhu tidak berubah selama 1 jam terakhir.\n"
-                                f"🔢 Nilai tetap: *{suhu_error:.2f}°C*\n"
-                                f"📌 Kemungkinan sensor atau ESP32 mengalami macet.")
-
-                # Kirim notifikasi dan langsung ubah status
-                threading.Thread(target=lambda: asyncio.run(self.telegram_service.send_message(error_message))).start()
+                error_message = f"⚠️ *PERINGATAN SISTEM ERROR* ⚠️\n\nSuhu macet di *{suhu_error:.2f}°C*."
+                self.telegram_service.send_message(error_message)
                 self.is_error_notified = True
-            else:
-                logger.info("Sistem error masih terdeteksi, tetapi notifikasi sudah dikirim sebelumnya. Tidak ada tindakan.")
-        
-        # Kondisi 2: Sistem Kembali Normal (nilai suhu bervariasi)
         else:
             if self.is_error_notified:
-                logger.info("Sistem kembali normal. Mereset status notifikasi error.")
-                # Reset status agar siap mengirim notifikasi lagi jika error terjadi di masa depan
                 self.is_error_notified = False
-            else:
-                logger.info("Data bervariasi, sistem pemantauan normal.")
 
 class TemperatureMonitor:
-    """Main class untuk mengelola seluruh aplikasi"""
-    
     def __init__(self):
-        # Initialize configuration
         self.config = TemperatureMonitorConfig()
-        
-        # Initialize components
-        self.latest_temperature = None
+        self.latest_temperatures = { "dryer1": None, "dryer2": None, "dryer3": None }
         self.data_lock = threading.Lock()
-        
-        # --- TAMBAHKAN SATU BARIS INI ---
-        # Status bisa: 'NORMAL', 'LOW', 'HIGH'
-        self.current_alert_status = 'NORMAL'
-        # --------------------------------
-        
-        # Database manager
+        self.alert_status = { "dryer1": "NORMAL", "dryer2": "NORMAL", "dryer3": "NORMAL" }
         self.db_manager = DatabaseManager(self.config.DB_PATH)
-        
-        # MQTT service
-        self.mqtt_service = MQTTService(self.config, self._on_mqtt_message)
-        
-        # Telegram service
         self.telegram_service = TelegramService(self.config, self.db_manager)
-        
-        # Background tasks
+        self.mqtt_service = MQTTService(self.config, self._on_mqtt_message)
         self.tasks = []
     
-    def _on_mqtt_message(self, raw_temperature):
-        """Callback untuk MQTT messages"""
-        adjusted_temperature = self.config.apply_temperature_offset(raw_temperature)
-        
-        with self.data_lock:
-            self.latest_temperature = raw_temperature
-        
-        logger.info(f"MQTT Data received: {raw_temperature:.2f}°C (adjusted: {adjusted_temperature:.2f}°C) at {self.config.format_indonesia_time()}")
-        
-        # --- LOGIKA BARU DITAMBAHKAN (KIRIM NOTIFIKASI SUHU) ---
-        current_hour = self.config.get_indonesia_time().hour
-        # --- Tambah logika operasional pabrik jam 6 sampai 16.59
-        if 6 <=current_hour < 17:
-            # --- Logika notifikasi hanya bekerja di jam operasional 
-            waktu_kejadian = self.config.format_indonesia_time()
-            
-            # Kondisi 1 Jika suhu terlalu TINGGI 
-            if adjusted_temperature > self.config.MAX_TEMP_ALERT:
-                if self.current_alert_status != "HIGH":
-                    logger.warning(f"Suhu MELEBIHI batas: {adjusted_temperature:.1f}°C. Mengirim notifikasi.")
-                    pesan = (f"🔥 *PERINGATAN: SUHU TINGGI* 🔥\n\n"
-                             f"🌡️ Suhu saat ini: *{adjusted_temperature:.1f}°C*\n"
-                            f"📈 Batas atas: {self.config.MAX_TEMP_ALERT}°C\n"
-                            f"🕒 Waktu: {waktu_kejadian}")
-                    
-                    threading.Thread(target=lambda: asyncio.run(self.telegram_service.send_message(pesan))).start()
-                    self.current_alert_status = 'HIGH'
-            
-            # Kondisi 2 Jika suhu terlalu RENDAH
-            elif adjusted_temperature > self.config.MIN_TEMP_ALERT:
-                if self.current_alert_status != "LOW":
-                    logger.warning(f"Suhu MELEBIHI batas: {adjusted_temperature:.1f}°C. Mengirim notifikasi.")
-                    pesan = (f"🔥 *PERINGATAN: SUHU TINGGI* 🔥\n\n"
-                             f"🌡️ Suhu saat ini: *{adjusted_temperature:.1f}°C*\n"
-                            f"📈 Batas atas: {self.config.MIN_TEMP_ALERT}°C\n"
-                            f"🕒 Waktu: {waktu_kejadian}")
-                    
-                    threading.Thread(target=lambda: asyncio.run(self.telegram_service.send_message(pesan))).start()
-                    self.current_alert_status = 'LOW'
+    def _on_mqtt_message(self, raw_temperature, topic):
+        dryer_id = None
+        for id, t in self.config.MQTT_TOPICS.items():
+            if t == topic:
+                dryer_id = id
+                break
+        if not dryer_id: return
 
-            # Kondisi 3 Jika suhu masuk kategori Normal
-            else:
-                if self.current_alert_status != 'NORMAL':
-                    logger.info(f"Suhu KEMBALI NORMAL: {adjusted_temperature:.1f}°C. Mengirim notifikasi.")
-                    pesan = (f"✅ *INFORMASI: SUHU NORMAL* ✅\n\n"
-                             f"🌡️ Suhu saat ini: *{adjusted_temperature:.1f}°C*\n"
-                            f"👍 Kembali dalam rentang normal ({self.config.MIN_TEMP_ALERT}°C - {self.config.MAX_TEMP_ALERT}°C)\n"
-                            f"🕒 Waktu: {waktu_kejadian}")
-                    
-                    threading.Thread(target=lambda: asyncio.run(self.telegram_service.send_message(pesan))).start()
-                    self.current_alert_status = 'NORMAL'
-                    
-        else:
-            # Di luar jam operasional, pastikan status kembali normal agar notifikasi siap untuk hari berikutnya
-            if self.current_alert_status != 'NORMAL':
-                logger.info("Di luar jam operasional. Mereset status notifikasi menjadi NORMAL.")
-                self.current_alert_status = 'NORMAL'
-                
-                
-    def get_latest_temperature(self):
-        """Mendapatkan pembacaan suhu terbaru"""
+        adjusted_temperature = self.config.apply_temperature_offset(raw_temperature)
         with self.data_lock:
-            return self.latest_temperature
-    
+            self.latest_temperatures[dryer_id] = adjusted_temperature
+        
+        waktu_simpan = self.config.format_indonesia_time_simple()
+        self.db_manager.insert_temperature(waktu_simpan, dryer_id, adjusted_temperature)
+        
+        current_hour = self.config.get_indonesia_time().hour
+        if not (6 <= current_hour < 17):
+            if self.alert_status[dryer_id] != 'NORMAL': self.alert_status[dryer_id] = 'NORMAL'
+            return
+
+        pesan = None
+        if adjusted_temperature > self.config.MAX_TEMP_ALERT and self.alert_status[dryer_id] != 'HIGH':
+            pesan = f"🔥 *SUHU TINGGI ({dryer_id.upper()})* 🔥\n\nSuhu: *{adjusted_temperature:.1f}°C*"
+            self.alert_status[dryer_id] = 'HIGH'
+        elif adjusted_temperature < self.config.MIN_TEMP_ALERT and self.alert_status[dryer_id] != 'LOW':
+            pesan = f"❄️ *SUHU RENDAH ({dryer_id.upper()})* ❄️\n\nSuhu: *{adjusted_temperature:.1f}°C*"
+            self.alert_status[dryer_id] = 'LOW'
+        
+        if pesan:
+            self.telegram_service.send_message(pesan)
+
     def start_background_tasks(self):
-        """Memulai semua background tasks"""
-        # Data saving task
-        data_save_task = DataSaveTask(self.config, self, self.db_manager)
-        data_save_task.start()
-        self.tasks.append(data_save_task)
-        
-        # Excel sending task
-        excel_send_task = ExcelSendTask(self.config, self.db_manager, self.telegram_service)
-        excel_send_task.start()
-        self.tasks.append(excel_send_task)
-        
-        # Keepalive task
-        keepalive_task = KeepaliveTask(self.config)
-        keepalive_task.start()
-        self.tasks.append(keepalive_task)
-        
-        # Monitor task
-        monitor_task = MonitorDataTask(self.config, self.db_manager, self.telegram_service)
-        monitor_task.start()
-        self.tasks.append(monitor_task)
-        
+        # DataSaveTask tidak lagi diperlukan karena penyimpanan data dilakukan di _on_mqtt_message
+        self.tasks.append(DailyExcelReportTask(self.config, self.db_manager, self.telegram_service))
+        self.tasks.append(KeepaliveTask(self.config))
+        self.tasks.append(MonitorDataTask(self.config, self.db_manager, self.telegram_service))
+        for task in self.tasks:
+            task.start()
         logger.info("All background tasks started")
     
     def stop_background_tasks(self):
-        """Menghentikan semua background tasks"""
         for task in self.tasks:
             task.stop()
         logger.info("All background tasks stopped")
     
     def create_flask_app(self):
-        """Membuat dan mengkonfigurasi Flask app"""
-        app = Flask(__name__)
+        app = Flask(__name__, template_folder='templates', static_folder='static')
+        app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'default-secret-key-for-dev')
+        login_manager = LoginManager()
+        login_manager.init_app(app)
+        login_manager.login_view = 'login'
+
+        # --- Login manager
+        @login_manager.user_loader
+        def load_user(user_id):
+            return self.db_manager.get_user_by_id(user_id)
         
         @app.route("/")
         def index():
-            """Halaman utama"""
             with self.data_lock:
-                current_raw_suhu = self.latest_temperature
-                if current_raw_suhu is None: 
-                    adjusted_suhu_str = "Data Belum Diterima"
-                else:
-                    current_adjusted_suhu = self.config.apply_temperature_offset(current_raw_suhu)
-                    adjusted_suhu_str = f"{current_adjusted_suhu:.1f}"
-            
-            context = {
-                "db_path": self.config.DB_PATH,
-                "current_time": self.config.format_indonesia_time(),
-                "save_interval": self.config.DATA_SAVE_INTERVAL,
-                "excel_interval": self.config.EXCEL_SEND_INTERVAL,
-                "current_suhu": adjusted_suhu_str,
-                "timezone": "Asia/Jakarta (WIB)"
-            }
+                context = {
+                    "current_suhu_1": f"{self.latest_temperatures['dryer1']:.1f} °C" if self.latest_temperatures['dryer1'] else "N/A",
+                    "current_suhu_2": f"{self.latest_temperatures['dryer2']:.1f} °C" if self.latest_temperatures['dryer2'] else "N/A",
+                    "current_suhu_3": f"{self.latest_temperatures['dryer3']:.1f} °C" if self.latest_temperatures['dryer3'] else "N/A",
+                    "current_time": self.config.format_indonesia_time(),
+                    "timezone": str(self.config.INDONESIA_TZ)
+                }
             return render_template("index.html", **context)
         
-        @app.route("/status")
-        def status():
-            """Endpoint untuk monitoring status"""
-            try:
-                # Get approximate count
-                conn = self.db_manager.get_connection()
-                c = conn.cursor()
-                c.execute("SELECT COUNT(*) FROM suhu")
-                total = c.fetchone()[0]
-                conn.close()
-                
-                latest_records = self.db_manager.get_recent_data(5)
-                
-                # Get statistics for last 24 hours
-                yesterday = (self.config.get_indonesia_time() - datetime.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
-                stats = self.db_manager.get_statistics(yesterday)
-                
-                with self.data_lock:
-                    current_mqtt_data = self.latest_temperature
-                    adjusted_mqtt_data = self.config.apply_temperature_offset(current_mqtt_data) if current_mqtt_data else None
-                
-                return {
-                    "status": "running",
-                    "database_path": self.config.DB_PATH,
-                    "total_records": total,
-                    "latest_records": latest_records,
-                    "latest_mqtt": {
-                        "raw": current_mqtt_data,
-                        "adjusted": adjusted_mqtt_data
-                    },
-                    "statistics_24h": {
-                        "average": round(stats[0], 2) if stats[0] else None,
-                        "minimum": stats[1],
-                        "maximum": stats[2]
-                    },
-                    "temperature_offset": self.config.TEMPERATURE_OFFSET,
-                    "intervals": {
-                        "data_save_seconds": self.config.DATA_SAVE_INTERVAL,
-                        "excel_send_seconds": self.config.EXCEL_SEND_INTERVAL
-                    },
-                    "mqtt_config": {
-                        "broker": self.config.MQTT_BROKER,
-                        "topic": self.config.MQTT_TOPIC,
-                        "connected": self.mqtt_service.is_connected
-                    },
-                    "timestamp": self.config.format_indonesia_time(),
-                    "timezone": "Asia/Jakarta (WIB)"
-                }
-            except Exception as e:
-                logger.error(f"Status endpoint error: {e}")
-                return {"error": str(e)}, 500
+        @app.route('/login', methods=['GET', 'POST'])
+        def login():
+            if request.method == 'POST':
+                username = request.form['username']
+                password = request.form['password']
+                user = self.db_manager.get_user_by_username(username)
+                if user and check_password_hash(user.password, password):
+                    login_user(user)
+                    return redirect(url_for('index'))
+                else:
+                    flash('Username atau password salah', 'danger')
+            return render_template('login.html')
+
+        @app.route('/logout')
+        @login_required
+        def logout():
+            logout_user()
+            return redirect(url_for('login'))
+        
+        @app.route("/data")
+        def get_data_api():
+            selected_date = request.args.get('date')
+            # Memanggil dengan latest_only=True untuk mendapatkan 1 data terbaru
+            rows = self.db_manager.get_data_by_date_pivoted(selected_date, latest_only=True)
+            data = [{"waktu": r[0], "dryer1": r[1], "dryer2": r[2], "dryer3": r[3]} for r in rows]
+            return jsonify(data)
+
+        @app.route("/download")
+        def download_excel():
+            selected_date = request.args.get('date')
+            # Memanggil tanpa parameter tambahan untuk mendapatkan semua data
+            rows = self.db_manager.get_data_by_date_pivoted(selected_date)
+            if not rows: return "Tidak ada data.", 404
+            wb = Workbook()
+            ws = wb.active
+            ws.append(["Waktu (WIB)", "Dryer 1 (°C)", "Dryer 2 (°C)", "Dryer 3 (°C)"])
+            for row in rows: ws.append(list(row))
+            buffer = BytesIO()
+            wb.save(buffer)
+            buffer.seek(0)
+            filename = f"laporan_{selected_date}.xlsx"
+            return Response(buffer, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': f'attachment;filename={filename}'})
         
         @app.route("/keepalive")
         def keepalive():
-            """Endpoint untuk keep container alive"""
-            with self.data_lock:
-                current_suhu = self.latest_temperature
-                adjusted_suhu = self.config.apply_temperature_offset(current_suhu) if current_suhu else None
-                
-            return {
-                "status": "alive", 
-                "timestamp": self.config.format_indonesia_time(),
-                "latest_suhu": {
-                    "raw": current_suhu,
-                    "adjusted": adjusted_suhu
-                },
-                "temperature_offset": self.config.TEMPERATURE_OFFSET,
-                "timezone": "WIB",
-                "next_save": f"{self.config.DATA_SAVE_INTERVAL} seconds",
-                "next_excel": f"{self.config.EXCEL_SEND_INTERVAL} seconds"
-            }
+            return {"status": "alive", "timestamp": self.config.format_indonesia_time()}
         
         @app.route("/test-telegram")
         def test_telegram():
-            """Test Telegram bot connection"""
-            try:
-                current_time = self.config.format_indonesia_time()
-                with self.data_lock:
-                    raw_temp = self.latest_temperature
-                    adjusted_temp = self.config.apply_temperature_offset(raw_temp) if raw_temp else None
-                    
-                message = f"🧪 **Test Message dari Temperature Monitor**\n🕐 {current_time}\n💾 Save: setiap {self.config.DATA_SAVE_INTERVAL} detik\n📊 Excel: setiap {self.config.EXCEL_SEND_INTERVAL} detik"
-                if adjusted_temp:
-                    message += f"\n🌡️ Latest Suhu Dryer 2: {adjusted_temp:.1f}°C"
-                
-                # Run async function in thread
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                success = loop.run_until_complete(self.telegram_service.send_message(message))
-                loop.close()
-                
-                if success:
-                    return {"status": "success", "message": "Test message sent", "time": current_time}
-                else:
-                    return {"status": "error", "message": "Failed to send message"}, 500
-                    
-            except Exception as e:
-                logger.error(f"Telegram test failed: {e}")
-                return {"error": str(e)}, 500
+            message = f"🧪 **Test Message**\n🕐 {self.config.format_indonesia_time()}"
+            self.telegram_service.send_message(message)
+            return {"status": "success", "message": "Test message queued"}
         
         return app
     
     def run(self):
-        """Main execution method"""
+        # --- LOGIN SYSTEM: Membuat user awal dari secrets saat aplikasi start ---
+        admin_user = os.getenv('ADMIN_USER')
+        admin_pass = os.getenv('ADMIN_PASSWORD')
+        if admin_user and admin_pass:
+            self.db_manager.create_initial_user(admin_user, admin_pass)
+        else:
+            logger.warning("ADMIN_USER dan ADMIN_PASSWORD tidak diatur. Tidak dapat membuat/memverifikasi user admin.")
+        # --------------------------------------------------------------------
         try:
-            # Connect to MQTT
-            if not self.mqtt_service.connect():
-                logger.warning("MQTT connection failed, but continuing with server startup")
-            
-            # Start background tasks
+            self.mqtt_service.connect()
+            self.telegram_service.start_worker()
             self.start_background_tasks()
-            
-            # Start Flask app in a separate thread
             app = self.create_flask_app()
-            flask_thread = threading.Thread(
-                target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080))),
-                daemon=True
-            )
+            flask_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080))), daemon=True)
             flask_thread.start()
-            
-            # Start Telegram bot polling (this will block)
             self.telegram_service.start_polling()
-            
         except KeyboardInterrupt:
             logger.info("Shutting down...")
         finally:
             self.stop_background_tasks()
+            self.telegram_service.stop_worker()
             self.mqtt_service.disconnect()
-
 
 if __name__ == "__main__":
     monitor = TemperatureMonitor()
