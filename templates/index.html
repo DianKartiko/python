@@ -21,7 +21,10 @@
                                         <i class="bi bi-thermometer-sun"></i>
                                         Suhu Dryer 1
                                     </h6>
-                                    <p class="temp-reading text-primary">0°C</p>
+                                    <!-- MENGGUNAKAN VARIABEL BARU -->
+                                    <p class="temp-reading text-primary">
+                                        {{ current_suhu_1 }}
+                                    </p>
                                 </div>
                             </div>
                         </div>
@@ -36,8 +39,9 @@
                                         <i class="bi bi-thermometer-sun"></i>
                                         Suhu Dryer 2
                                     </h6>
+                                    <!-- MENGGUNAKAN VARIABEL BARU -->
                                     <p class="temp-reading text-warning">
-                                        {{ current_suhu }} °C
+                                        {{ current_suhu_2 }}
                                     </p>
                                 </div>
                             </div>
@@ -53,18 +57,22 @@
                                         <i class="bi bi-thermometer-sun"></i>
                                         Suhu Dryer 3
                                     </h6>
-                                    <p class="temp-reading text-danger">0 °C</p>
+                                    <!-- MENGGUNAKAN VARIABEL BARU -->
+                                    <p class="temp-reading text-danger">
+                                        {{ current_suhu_3 }}
+                                    </p>
                                 </div>
                             </div>
                         </div>
                     </div>
 
+                    <!-- DAFTAR INFORMASI YANG DISESUAIKAN -->
                     <ul class="list-group list-group-flush">
                         <li
                             class="list-group-item d-flex justify-content-between align-items-center"
                         >
                             <span
-                                ><i class="bi bi-clock"></i> Waktu Saat
+                                ><i class="bi bi-clock"></i> Waktu Server Saat
                                 Ini</span
                             >
                             <span>{{ current_time }}</span>
@@ -72,26 +80,17 @@
                         <li
                             class="list-group-item d-flex justify-content-between align-items-center"
                         >
-                            <span
-                                ><i class="bi bi-save"></i> Interval Simpan
-                                Data</span
-                            >
-                            <span>{{ save_interval }} detik</span>
+                            <span><i class="bi bi-globe"></i> Timezone</span>
+                            <span>{{ timezone }}</span>
                         </li>
                         <li
                             class="list-group-item d-flex justify-content-between align-items-center"
                         >
                             <span
                                 ><i class="bi bi-file-earmark-spreadsheet"></i>
-                                Interval Kirim Excel</span
+                                Laporan Harian</span
                             >
-                            <span>{{ excel_interval }} detik</span>
-                        </li>
-                        <li
-                            class="list-group-item d-flex justify-content-between align-items-center"
-                        >
-                            <span><i class="bi bi-globe"></i> Timezone</span>
-                            <span>{{ timezone }}</span>
+                            <span>Setiap Pukul 00:00 WIB</span>
                         </li>
                         <li
                             class="list-group-item d-flex justify-content-between align-items-center"
@@ -116,14 +115,13 @@
                     >
                 </div>
 
-                <!-- Bagian data historis -->
+                <!-- Bagian data historis (tidak ada perubahan di sini) -->
                 <hr style="color: #374151" />
                 <h5 class="mt-4 mb-3 text-center">
                     <i class="bi bi-bar-chart-fill me-2"></i> Cari & Download
                     Data Historis
                 </h5>
 
-                <!-- Filter Tanggal (Sederhana) -->
                 <div
                     class="row g-3 justify-content-center align-items-end my-3 p-3 bg-light-dark rounded-3"
                 >
@@ -140,7 +138,6 @@
                     </div>
                 </div>
 
-                <!-- Placeholder untuk Tabel Data -->
                 <div id="data-section" class="mt-4" style="display: none">
                     <div
                         class="card-footer text-center d-flex flex-column mb-2 flex-md-row flex-lg-row gap-3 align-items-md-center justify-content-md-between"

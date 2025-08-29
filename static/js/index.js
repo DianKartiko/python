@@ -1,85 +1,86 @@
 document.addEventListener('DOMContentLoaded', function() {
-            // Data simulasi yang lebih lengkap
-            const mockData = [
-                // Data untuk hari ini (28 Ags 2025)
-                { waktu: '2025-08-28 12:10:15', dryer1: 71.5, dryer2: 74.5, dryer3: 77.0 },
-                { waktu: '2025-08-28 12:20:18', dryer1: 72.1, dryer2: 75.1, dryer3: 77.5 },
-                { waktu: '2025-08-28 12:30:20', dryer1: 72.8, dryer2: 75.8, dryer3: 78.2 },
-                // Data untuk kemarin (27 Ags 2025)
-                { waktu: '2025-08-27 10:00:00', dryer1: 70.0, dryer2: 72.0, dryer3: 74.0 },
-                { waktu: '2025-08-27 11:00:00', dryer1: 70.5, dryer2: 73.1, dryer3: 75.1 },
-                // Data untuk lusa (26 Ags 2025)
-                { waktu: '2025-08-26 15:00:00', dryer1: 68.5, dryer2: 70.5, dryer3: 72.5 },
-            ];
-            
-            const dataSection = document.getElementById('data-section');
-            const tableBody = document.getElementById('dataTableBody');
-            const loadingIndicator = document.getElementById('loadingIndicator');
-            const noDataMessage = document.getElementById('noDataMessage');
-            const downloadBtn = document.getElementById('downloadBtn');
-            const tableCaption = document.getElementById('tableCaption');
+    // --- Inisialisasi Elemen HTML ---
+    const dataSection = document.getElementById('data-section');
+    const tableBody = document.getElementById('dataTableBody');
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    const noDataMessage = document.getElementById('noDataMessage');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const tableCaption = document.getElementById('tableCaption');
 
-            function fetchData(selectedDateStr) {
-                if (!selectedDateStr) { return; }
+    // --- Fungsi Utama untuk Mengambil Data dari Server Python ---
+    async function fetchData(selectedDateStr) {
+        if (!selectedDateStr) { return; }
 
-                dataSection.style.display = 'none';
-                tableBody.innerHTML = '';
-                loadingIndicator.style.display = 'block';
-                noDataMessage.style.display = 'none';
+        // Tampilkan loading dan sembunyikan data lama
+        dataSection.style.display = 'none';
+        tableBody.innerHTML = '';
+        loadingIndicator.style.display = 'block';
+        noDataMessage.style.display = 'none';
 
-                // Simulasi delay jaringan
-                setTimeout(() => {
-                    const selectedDate = new Date(selectedDateStr);
-                    const startDate = new Date(selectedDate);
-                    startDate.setHours(0, 0, 0, 0);
-                    const endDate = new Date(selectedDate);
-                    endDate.setHours(23, 59, 59, 999);
-
-                    const filteredData = mockData.filter(item => {
-                        const itemDate = new Date(item.waktu);
-                        return itemDate >= startDate && itemDate <= endDate;
-                    });
-
-                    loadingIndicator.style.display = 'none';
-
-                    if (filteredData.length === 0) {
-                        noDataMessage.style.display = 'block';
-                    } else {
-                        dataSection.style.display = 'block';
-                        tableCaption.textContent = `Menampilkan ${filteredData.length} rekaman data`;
-                        filteredData.sort((a, b) => new Date(b.waktu) - new Date(a.waktu));
-                        filteredData.forEach(row => {
-                            const tr = document.createElement('tr');
-                            tr.innerHTML = `
-                                <td>${row.waktu.split(' ')[1]}</td>
-                                <td>${row.dryer1}°C</td>
-                                <td>${row.dryer2}°C</td>
-                                <td>${row.dryer3}°C</td>`;
-                            tableBody.appendChild(tr);
-                        });
-                    }
-                }, 800);
+        try {
+            // Panggil endpoint /data di server Flask Anda
+            // Server akan mengirimkan 1 data terbaru untuk tanggal ini
+            const response = await fetch(`/data?date=${selectedDateStr}`);
+            if (!response.ok) {
+                throw new Error(`Gagal mengambil data: ${response.statusText}`);
             }
+            const data = await response.json(); // Ini akan berisi 0 atau 1 data
 
-            const datePicker = flatpickr("#datePicker", {
-                theme: "dark",
-                dateFormat: "Y-m-d",
-                defaultDate: "today",
-                onChange: function(selectedDates, dateStr, instance) {
-                    fetchData(dateStr);
-                }
-            });
+            loadingIndicator.style.display = 'none';
 
-            downloadBtn.addEventListener('click', function() {
-                const selectedDate = datePicker.input.value;
-                if (!selectedDate) {
-                    alert('Tanggal tidak valid.');
-                    return;
-                }
-                alert(`Akan memulai download data Excel untuk tanggal: ${selectedDate}`);
-                window.open(`/download?start=${selectedDate}&end=${selectedDate}`, '_blank');
-            });
-            
-            // Muat data awal untuk hari ini
-            fetchData(datePicker.input.value);
-        });
+            if (data.length === 0) {
+                noDataMessage.style.display = 'block';
+                noDataMessage.textContent = `Tidak ada data tercatat pada tanggal ${selectedDateStr}.`;
+            } else {
+                dataSection.style.display = 'block';
+                const rowData = data[0]; // Ambil satu-satunya data
+                
+                tableCaption.textContent = `Data terakhir pada pukul ${rowData.waktu.split(' ')[1]}`;
+                
+                // Buat satu baris tabel
+                const tr = document.createElement('tr');
+                
+                const dryer1 = rowData.dryer1 !== null ? `${rowData.dryer1}°C` : 'N/A';
+                const dryer2 = rowData.dryer2 !== null ? `${rowData.dryer2}°C` : 'N/A';
+                const dryer3 = rowData.dryer3 !== null ? `${rowData.dryer3}°C` : 'N/A';
+                
+                tr.innerHTML = `
+                    <td>${rowData.waktu.split(' ')[1]}</td>
+                    <td>${dryer1}</td>
+                    <td>${dryer2}</td>
+                    <td>${dryer3}</td>`;
+                tableBody.appendChild(tr);
+            }
+        } catch (error) {
+            loadingIndicator.style.display = 'none';
+            noDataMessage.textContent = `Error: ${error.message}`;
+            noDataMessage.style.display = 'block';
+            console.error("Fetch error:", error);
+        }
+    }
+
+    // --- Inisialisasi Datepicker ---
+    const datePicker = flatpickr("#datePicker", {
+        theme: "dark",
+        dateFormat: "Y-m-d",
+        defaultDate: "today",
+        // Setiap kali tanggal diubah, panggil fungsi fetchData
+        onChange: function(selectedDates, dateStr, instance) {
+            fetchData(dateStr);
+        }
+    });
+
+    // --- Event Listener untuk Tombol Download ---
+    downloadBtn.addEventListener('click', function() {
+        const selectedDate = datePicker.input.value;
+        if (!selectedDate) {
+            alert('Tanggal tidak valid.');
+            return;
+        }
+        // Buka URL /download di server Flask untuk memulai download semua data
+        window.open(`/download?date=${selectedDate}`, '_blank');
+    });
+    
+    // --- Muat data awal untuk hari ini saat halaman pertama kali dibuka ---
+    fetchData(datePicker.input.value);
+});
