@@ -155,3 +155,20 @@ html[data-bs-theme="dark"] .btn-success:hover {
 }
 
 /* === AKHIR PERBAIKAN === */
+
+/* GAYA NOTIFIKASI TOAST UNTUK DARK MODE */
+html[data-bs-theme="dark"] .toast {
+    background-color: #1f2937;
+    color: #d1d5db;
+    border: 1px solid #374151;
+}
+
+html[data-bs-theme="dark"] .toast-header {
+    background-color: #374151;
+    color: #f3f4f6;
+    border-bottom: 1px solid #4b5563;
+}
+
+html[data-bs-theme="dark"] .btn-close {
+    filter: invert(1) grayscale(100%) brightness(200%);
+}
