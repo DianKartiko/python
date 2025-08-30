@@ -23,6 +23,14 @@
         filename='css/style.css')}}"
         />
 
+        <!-- Favicon -->
+        <link
+            rel="icon"
+            type="image/png"
+            href="{{url_for('static', filename='favicon.ico')}}"
+            sizes="96x96"
+        />
+
         <!-- Custom CSS for another style -->
         {%block style%}{%endblock%}
 
@@ -38,6 +46,13 @@
             href="https://npmcdn.com/flatpickr/dist/themes/dark.css"
         />
         <title>Temperature Monitor</title>
+
+        <!-- Skrip untuk menerapkan tema sebelum halaman dimuat penuh -->
+        <script>
+            // Terapkan tema yang tersimpan di localStorage, atau gunakan 'dark' sebagai default
+            const savedTheme = localStorage.getItem("theme") || "dark";
+            document.documentElement.setAttribute("data-bs-theme", savedTheme);
+        </script>
     </head>
 
     <body>

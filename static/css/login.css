@@ -1,28 +1,34 @@
- body {
-     background-color: #030712;
-     color: #d1d5db;
- }
+html[data-bs-theme="dark"] body {
+    background-color: #030712;
+    color: #d1d5db;
+}
 
- .login-card {
-     background-color: #111827;
-     border: 1px solid #374151;
-     border-radius: 0.75rem;
- }
+html[data-bs-theme="dark"] .login-card {
+    background-color: #111827;
+    border: 1px solid #374151;
+    border-radius: 0.75rem;
+}
 
- .form-control {
-     background-color: #1f2937;
-     border-color: #4b5563;
-     color: #f3f4f6;
- }
+html[data-bs-theme="dark"] .form-control {
+    background-color: #1f2937;
+    border-color: #4b5563;
+    color: #f3f4f6;
+}
 
- .form-control:focus {
-     background-color: #1f2937;
-     border-color: #3b82f6;
-     color: #f3f4f6;
-     box-shadow: 0 0 0 0.25rem rgba(59, 130, 246, 0.25);
- }
+html[data-bs-theme="dark"] .form-control:focus {
+    background-color: #1f2937;
+    border-color: #3b82f6;
+    color: #f3f4f6;
+    box-shadow: 0 0 0 0.25rem rgba(59, 130, 246, 0.25);
+}
 
- .btn-primary {
-     background-color: #3b82f6;
-     border-color: #3b82f6;
- }
+html[data-bs-theme="dark"] .btn-primary {
+    background-color: #3b82f6;
+    border-color: #3b82f6;
+}
+
+html[data-bs-theme="dark"] .alert-danger {
+    background-color: #4B171B;
+    color: #F8D7DA;
+    border-color: #a33a41;
+}
