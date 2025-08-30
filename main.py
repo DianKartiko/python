@@ -1,7 +1,8 @@
 # Flask Requirements
-from flask import Flask, request, render_template, jsonify, Response, redirect, url_for, flash
+from flask import Flask, request, render_template, jsonify, Response, redirect, url_for, flash, session
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
+from urllib.parse import urlparse, urljoin
 # Threading and Request
 import threading
 import requests
@@ -10,6 +11,7 @@ import sqlite3
 # Timezone Requirements
 import datetime
 import time
+from datetime import timedelta
 from zoneinfo import ZoneInfo  # Untuk timezone Indonesia
 # MQTT Service 
 import paho.mqtt.client as mqtt
@@ -28,6 +30,7 @@ from openpyxl.styles import Font, Alignment
 # Untuk Input dan Output
 from queue import Queue, Empty
 from io import BytesIO
+from functools import wraps
 
 # Setup logging dengan timezone Indonesia
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,12 +38,74 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+
+
 # --- LOGIN SYSTEM: User Class ---
 class User(UserMixin):
     def __init__(self, id, username, password):
         self.id = id
         self.username = username
         self.password = password
+
+def is_safe_url(target):
+    """Validasi URL untuk mencegah open redirect vulnerability"""
+    ref_url = urlparse(request.host_url)
+    test_url = urlparse(urljoin(request.host_url, target))
+    return test_url.scheme in ('http', 'https') and ref_url.netloc == test_url.netloc
+
+# 2. SESSION TIMEOUT DECORATOR (tambah sebelum class TemperatureMonitor)
+def check_session_timeout(f):
+    """Decorator untuk mengecek apakah session sudah timeout"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if current_user.is_authenticated:
+            # Cek apakah ada timestamp login di session
+            if 'login_timestamp' in session:
+                login_time = session['login_timestamp']
+                current_time = time.time()
+                
+                # Hitung durasi login (24 jam = 86400 detik)
+                session_duration = current_time - login_time
+                max_session_duration = 24 * 60 * 60  # 24 jam dalam detik
+                
+                if session_duration > max_session_duration:
+                    # Session expired, logout otomatis
+                    logout_user()
+                    session.clear()  # Bersihkan semua session data
+                    flash('Your session has expired after 24 hours. Please log in again.', 'warning')
+                    return redirect(url_for('login'))
+                else:
+                    # Session masih valid, update last activity
+                    session['last_activity'] = current_time
+            else:
+                # Tidak ada timestamp login, anggap session tidak valid
+                logout_user()
+                session.clear()
+                flash('Invalid session. Please log in again.', 'warning')
+                return redirect(url_for('login'))
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
+# 3. SESSION INFO HELPER (tambah sebelum class TemperatureMonitor)
+def get_session_info():
+    """Helper untuk mendapatkan informasi session"""
+    if not current_user.is_authenticated or 'login_timestamp' not in session:
+        return None
+    
+    login_time = session['login_timestamp']
+    current_time = time.time()
+    session_age = current_time - login_time
+    remaining_time = (24 * 60 * 60) - session_age  # sisa waktu dalam detik
+    
+    return {
+        'login_time': datetime.datetime.fromtimestamp(login_time).strftime('%Y-%m-%d %H:%M:%S'),
+        'session_age_hours': session_age / 3600,
+        'remaining_hours': max(0, remaining_time / 3600),
+        'remaining_minutes': max(0, (remaining_time % 3600) / 60),
+        'is_expiring_soon': remaining_time < (2 * 3600),  # kurang dari 2 jam
+        'expires_at': datetime.datetime.fromtimestamp(login_time + (24 * 60 * 60)).strftime('%Y-%m-%d %H:%M:%S')
+    }
 # ------------------------------
 
 # Basic Configuration
@@ -57,6 +122,7 @@ class TemperatureMonitorConfig:
         }
         self.TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
         self.CHAT_ID = os.getenv("CHAT_ID")
+        self.DATA_SAVE_INTERVAL = 600 # Pengambilan data di lakukan setiap 10 menit sekali
         self.TEMPERATURE_OFFSET = 12.6
         self.INDONESIA_TZ = ZoneInfo("Asia/Jakarta")
         self.MIN_TEMP_ALERT = float(120)
@@ -445,6 +511,32 @@ class BackgroundTask:
         self.is_running = False
         if self.thread: self.thread.join(timeout=5)
 
+# --- DIKEMBALIKAN: DataSaveTask untuk menyimpan per 10 menit ---
+class DataSaveTask(BackgroundTask):
+    """Task untuk menyimpan data ke database setiap 10 menit sekali."""
+    
+    def __init__(self, config, data_provider, db_manager):
+        super().__init__(config.DATA_SAVE_INTERVAL, "DataSaveTask")
+        self.config = config
+        self.data_provider = data_provider
+        self.db_manager = db_manager
+    
+    def task(self):
+        """Menyimpan data suhu terakhir dari memori ke database."""
+        latest_temps = self.data_provider.get_latest_temperatures()
+        waktu = self.config.format_indonesia_time_simple()
+        
+        logger.info(f"Menjalankan DataSaveTask pada {waktu}. Menyimpan data terakhir...")
+        
+        for dryer_id, temp in latest_temps.items():
+            if temp is not None:
+                success = self.db_manager.insert_temperature(waktu, dryer_id, temp)
+                if success:
+                    logger.info(f"Data tersimpan untuk {dryer_id}: {waktu} | {temp:.2f}°C")
+                else:
+                    logger.error(f"Gagal menyimpan data untuk {dryer_id}")
+# --------------------------------------------------------------------
+
 class DailyExcelReportTask(BackgroundTask):
     def __init__(self, config, db_manager, telegram_service):
         super().__init__(-1, "DailyExcelReportTask")
@@ -535,44 +627,69 @@ class TemperatureMonitor:
         self.mqtt_service = MQTTService(self.config, self._on_mqtt_message)
         self.tasks = []
     
+    # --- DIPERBAIKI: _on_mqtt_message HANYA MENGUPDATE MEMORI ---
     def _on_mqtt_message(self, raw_temperature, topic):
+        """Callback untuk setiap pesan MQTT. Hanya mengupdate suhu di memori."""
         dryer_id = None
         for id, t in self.config.MQTT_TOPICS.items():
             if t == topic:
                 dryer_id = id
                 break
-        if not dryer_id: return
+        
+        if not dryer_id:
+            return
 
         adjusted_temperature = self.config.apply_temperature_offset(raw_temperature)
+        
         with self.data_lock:
             self.latest_temperatures[dryer_id] = adjusted_temperature
         
-        waktu_simpan = self.config.format_indonesia_time_simple()
-        self.db_manager.insert_temperature(waktu_simpan, dryer_id, adjusted_temperature)
+        logger.info(f"Data {{{dryer_id}}} diterima: {adjusted_temperature:.2f}°C (Diupdate di memori)")
         
         current_hour = self.config.get_indonesia_time().hour
-        if not (6 <= current_hour < 17):
-            if self.alert_status[dryer_id] != 'NORMAL': self.alert_status[dryer_id] = 'NORMAL'
-            return
+        if 6 <= current_hour < 17:
+            waktu_kejadian = self.config.format_indonesia_time()
+            pesan = None
+            
+            if adjusted_temperature > self.config.MAX_TEMP_ALERT:
+                if self.alert_status[dryer_id] != "HIGH":
+                    pesan = (f"🔥 *PERINGATAN: SUHU TINGGI ({dryer_id.upper()})* 🔥\n\n"
+                            f"🌡️ Suhu: *{adjusted_temperature:.1f}°C* | Batas: {self.config.MAX_TEMP_ALERT}°C\n"
+                            f"🕒 Waktu: {waktu_kejadian}")
+                    self.alert_status[dryer_id] = 'HIGH'
+            
+            elif adjusted_temperature < self.config.MIN_TEMP_ALERT:
+                if self.alert_status[dryer_id] != "LOW":
+                    pesan = (f"❄️ *PERINGATAN: SUHU RENDAH ({dryer_id.upper()})* ❄️\n\n"
+                            f"🌡️ Suhu: *{adjusted_temperature:.1f}°C* | Batas: {self.config.MIN_TEMP_ALERT}°C\n"
+                            f"🕒 Waktu: {waktu_kejadian}")
+                    self.alert_status[dryer_id] = 'LOW' 
+            else:
+                if self.alert_status[dryer_id] != 'NORMAL':
+                    self.alert_status[dryer_id] = 'NORMAL'
+            
+            if pesan:
+                self.telegram_service.send_message(pesan)
+        else:
+            if self.alert_status[dryer_id] != 'NORMAL':
+                self.alert_status[dryer_id] = 'NORMAL'
 
-        pesan = None
-        if adjusted_temperature > self.config.MAX_TEMP_ALERT and self.alert_status[dryer_id] != 'HIGH':
-            pesan = f"🔥 *SUHU TINGGI ({dryer_id.upper()})* 🔥\n\nSuhu: *{adjusted_temperature:.1f}°C*"
-            self.alert_status[dryer_id] = 'HIGH'
-        elif adjusted_temperature < self.config.MIN_TEMP_ALERT and self.alert_status[dryer_id] != 'LOW':
-            pesan = f"❄️ *SUHU RENDAH ({dryer_id.upper()})* ❄️\n\nSuhu: *{adjusted_temperature:.1f}°C*"
-            self.alert_status[dryer_id] = 'LOW'
-        
-        if pesan:
-            self.telegram_service.send_message(pesan)
-
+    def get_latest_temperatures(self):
+        """Mendapatkan semua suhu terbaru dari memori."""
+        with self.data_lock:
+            return self.latest_temperatures.copy()
+    
+    # --- DIPERBAIKI: Menjalankan kembali DataSaveTask ---
     def start_background_tasks(self):
-        # DataSaveTask tidak lagi diperlukan karena penyimpanan data dilakukan di _on_mqtt_message
+        """Memulai semua background tasks"""
+        self.tasks.append(DataSaveTask(self.config, self, self.db_manager))
         self.tasks.append(DailyExcelReportTask(self.config, self.db_manager, self.telegram_service))
         self.tasks.append(KeepaliveTask(self.config))
         self.tasks.append(MonitorDataTask(self.config, self.db_manager, self.telegram_service))
+        
         for task in self.tasks:
             task.start()
+            
         logger.info("All background tasks started")
     
     def stop_background_tasks(self):
@@ -583,16 +700,35 @@ class TemperatureMonitor:
     def create_flask_app(self):
         app = Flask(__name__, template_folder='templates', static_folder='static')
         app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'default-secret-key-for-dev')
+
+        # ✅ SESSION CONFIGURATION untuk 24 jam
+        app.config.update(
+            PERMANENT_SESSION_LIFETIME=timedelta(hours=24),  # 24 jam
+            SESSION_COOKIE_HTTPONLY=True,  # Security: tidak bisa diakses via JavaScript
+            SESSION_COOKIE_SECURE=False,   # Set True jika pakai HTTPS
+            SESSION_COOKIE_SAMESITE='Lax'  # CSRF protection
+        )
+
         login_manager = LoginManager()
         login_manager.init_app(app)
         login_manager.login_view = 'login'
+        login_manager.session_protection = "strong"
 
         # --- Login manager
         @login_manager.user_loader
         def load_user(user_id):
             return self.db_manager.get_user_by_id(user_id)
         
+        #Custom unauthorized handler untuk smart redirect
+        @login_manager.unauthorized_handler
+        def unauthorized():
+            if request.endpoint != 'login':
+                return redirect(url_for('login', next=request.url))
+            return redirect(url_for('login'))
+
         @app.route("/")
+        @login_required
+        @check_session_timeout  
         def index():
             with self.data_lock:
                 context = {
@@ -606,21 +742,44 @@ class TemperatureMonitor:
         
         @app.route('/login', methods=['GET', 'POST'])
         def login():
+            if current_user.is_authenticated:
+                return redirect(url_for('index'))
+            
             if request.method == 'POST':
                 username = request.form['username']
                 password = request.form['password']
                 user = self.db_manager.get_user_by_username(username)
+                
                 if user and check_password_hash(user.password, password):
-                    login_user(user)
-                    return redirect(url_for('index'))
+                    # ✅ LOGIN USER dengan permanent session
+                    login_user(user, remember=False)  # Tidak pakai "remember me"
+                    session.permanent = True  # Set session sebagai permanent
+                    
+                    # ✅ SIMPAN TIMESTAMP LOGIN
+                    session['login_timestamp'] = time.time()
+                    session['last_activity'] = time.time()
+                    session['username'] = user.username
+                    
+                    # Smart redirect
+                    next_page = request.args.get('next')
+                    if not next_page or not is_safe_url(next_page):
+                        next_page = url_for('index')
+                    
+                    flash(f'Welcome back, {user.username}! Session valid for 24 hours.', 'success')
+                    logger.info(f"User {user.username} logged in successfully from {request.remote_addr}")
+                    
+                    return redirect(next_page)
                 else:
                     flash('Username atau password salah', 'danger')
+                    logger.warning(f"Failed login attempt for username: {username} from {request.remote_addr}")
+            
             return render_template('login.html')
-
+    
         @app.route('/logout')
         @login_required
         def logout():
             logout_user()
+            flash('You have been logged out successfully.', 'info')
             return redirect(url_for('login'))
         
         @app.route("/data")
