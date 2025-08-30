@@ -31,14 +31,13 @@ from openpyxl.styles import Font, Alignment
 from queue import Queue, Empty
 from io import BytesIO
 from functools import wraps
+import json
 
 # Setup logging dengan timezone Indonesia
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-
-
 
 # --- LOGIN SYSTEM: User Class ---
 class User(UserMixin):
@@ -629,50 +628,60 @@ class TemperatureMonitor:
     
     # --- DIPERBAIKI: _on_mqtt_message HANYA MENGUPDATE MEMORI ---
     def _on_mqtt_message(self, raw_temperature, topic):
-        """Callback untuk setiap pesan MQTT. Hanya mengupdate suhu di memori."""
+        """Callback untuk setiap pesan MQTT. Memproses suhu dan mengirim notifikasi."""
         dryer_id = None
         for id, t in self.config.MQTT_TOPICS.items():
             if t == topic:
                 dryer_id = id
                 break
-        
+
         if not dryer_id:
             return
 
         adjusted_temperature = self.config.apply_temperature_offset(raw_temperature)
-        
+
         with self.data_lock:
             self.latest_temperatures[dryer_id] = adjusted_temperature
-        
-        logger.info(f"Data {{{dryer_id}}} diterima: {adjusted_temperature:.2f}°C (Diupdate di memori)")
-        
-        current_hour = self.config.get_indonesia_time().hour
-        if 6 <= current_hour < 17:
-            waktu_kejadian = self.config.format_indonesia_time()
-            pesan = None
-            
-            if adjusted_temperature > self.config.MAX_TEMP_ALERT:
-                if self.alert_status[dryer_id] != "HIGH":
-                    pesan = (f"🔥 *PERINGATAN: SUHU TINGGI ({dryer_id.upper()})* 🔥\n\n"
-                            f"🌡️ Suhu: *{adjusted_temperature:.1f}°C* | Batas: {self.config.MAX_TEMP_ALERT}°C\n"
-                            f"🕒 Waktu: {waktu_kejadian}")
-                    self.alert_status[dryer_id] = 'HIGH'
-            
-            elif adjusted_temperature < self.config.MIN_TEMP_ALERT:
-                if self.alert_status[dryer_id] != "LOW":
-                    pesan = (f"❄️ *PERINGATAN: SUHU RENDAH ({dryer_id.upper()})* ❄️\n\n"
-                            f"🌡️ Suhu: *{adjusted_temperature:.1f}°C* | Batas: {self.config.MIN_TEMP_ALERT}°C\n"
-                            f"🕒 Waktu: {waktu_kejadian}")
-                    self.alert_status[dryer_id] = 'LOW' 
-            else:
-                if self.alert_status[dryer_id] != 'NORMAL':
-                    self.alert_status[dryer_id] = 'NORMAL'
-            
-            if pesan:
-                self.telegram_service.send_message(pesan)
+
+        logger.info(f"Data {{{dryer_id}}} diterima: {adjusted_temperature:.2f}°C")
+
+        waktu_kejadian = self.config.format_indonesia_time()
+        telegram_message = None
+        notification_payload = None  # Payload untuk notifikasi web
+
+        # Cek suhu tinggi
+        if adjusted_temperature > self.config.MAX_TEMP_ALERT:
+            if self.alert_status[dryer_id] != "HIGH":
+                title = f"🔥 Suhu Tinggi ({dryer_id.upper()})"
+                message = f"Suhu mencapai {adjusted_temperature:.1f}°C, melebihi batas normal {self.config.MAX_TEMP_ALERT}°C."
+
+                telegram_message = f"*{title}*\n\n🌡️ Suhu: *{adjusted_temperature:.1f}°C*\n🕒 Waktu: {waktu_kejadian}"
+                notification_payload = {"title": title, "message": message}
+                self.alert_status[dryer_id] = 'HIGH'
+
+        # Cek suhu rendah
+        elif adjusted_temperature < self.config.MIN_TEMP_ALERT:
+            if self.alert_status[dryer_id] != "LOW":
+                title = f"❄️ Suhu Rendah ({dryer_id.upper()})"
+                message = f"Suhu turun menjadi {adjusted_temperature:.1f}°C, di bawah batas normal {self.config.MIN_TEMP_ALERT}°C."
+
+                telegram_message = f"*{title}*\n\n🌡️ Suhu: *{adjusted_temperature:.1f}°C*\n🕒 Waktu: {waktu_kejadian}"
+                notification_payload = {"title": title, "message": message}
+                self.alert_status[dryer_id] = 'LOW'
+
+        # Suhu kembali normal
         else:
             if self.alert_status[dryer_id] != 'NORMAL':
                 self.alert_status[dryer_id] = 'NORMAL'
+
+        # Kirim notifikasi jika ada
+        if telegram_message:
+            current_hour = self.config.get_indonesia_time().hour
+            if 6 <= current_hour < 17:
+                self.telegram_service.send_message(telegram_message)
+
+        if notification_payload:
+            self.notification_queue.put(notification_payload)
 
     def get_latest_temperatures(self):
         """Mendapatkan semua suhu terbaru dari memori."""
@@ -827,6 +836,24 @@ class TemperatureMonitor:
         def keepalive():
             return {"status": "alive", "timestamp": self.config.format_indonesia_time()}
         
+
+        # === ENDPOINT BARU: Stream Notifikasi Otomatis ===
+        @app.route('/stream-notifications')
+        @login_required
+        def stream_notifications():
+            def generate():
+                while True:
+                    try:
+                        # Ambil notifikasi dari antrean, tunggu hingga ada
+                        notification = self.notification_queue.get(timeout=None)
+                        # Format sebagai Server-Sent Event (SSE)
+                        yield f"data: {json.dumps(notification)}\n\n"
+                    except Exception as e:
+                        logger.error(f"Error in notification stream: {e}")
+                        time.sleep(1)
+            return Response(generate(), mimetype='text/event-stream')
+        # === AKHIR ENDPOINT BARU ===
+
         @app.route("/test-telegram")
         def test_telegram():
             message = f"🧪 **Test Message**\n🕐 {self.config.format_indonesia_time()}"

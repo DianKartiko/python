@@ -1,8 +1,10 @@
 document.addEventListener("DOMContentLoaded", function () {
-            // --- Inisialisasi Elemen HTML ---
+            // --- Inisialisasi Elemen ---
             const themeToggle = document.getElementById("theme-toggle");
             const themeText = document.getElementById("theme-text");
             const htmlElement = document.documentElement;
+            const locationToggle = document.getElementById('location-toggle');
+            const locationText = document.getElementById('location-text');
             const dataSection = document.getElementById('data-section');
             const tableBody = document.getElementById('dataTableBody');
             const loadingIndicator = document.getElementById('loadingIndicator');
@@ -11,7 +13,41 @@ document.addEventListener("DOMContentLoaded", function () {
             const tableCaption = document.getElementById('tableCaption');
             let datepickerInstance = null;
 
-            // --- Fungsi untuk Mengambil Data dari Server ---
+            // --- Fungsi Notifikasi & Stream ---
+            function showNotification(title, message) {
+                const toastContainer = document.querySelector('.toast-container');
+                const toastId = 'toast-' + Math.random().toString(36).substring(2, 9);
+                const toastHTML = `
+                    <div id="${toastId}" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+                      <div class="toast-header">
+                        <i class="bi bi-bell-fill me-2"></i>
+                        <strong class="me-auto">${title}</strong>
+                        <small>Baru saja</small>
+                        <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+                      </div>
+                      <div class="toast-body">${message}</div>
+                    </div>`;
+                toastContainer.insertAdjacentHTML('beforeend', toastHTML);
+                const toastElement = document.getElementById(toastId);
+                const toast = new bootstrap.Toast(toastElement);
+                toastElement.addEventListener('hidden.bs.toast', () => toastElement.remove());
+                toast.show();
+            }
+
+            function connectToNotificationStream() {
+                const eventSource = new EventSource("/stream-notifications");
+                eventSource.onmessage = function(event) {
+                    const notification = JSON.parse(event.data);
+                    showNotification(notification.title, notification.message);
+                };
+                eventSource.onerror = function(err) {
+                    console.error("Koneksi stream notifikasi gagal, mencoba lagi dalam 5 detik...", err);
+                    eventSource.close();
+                    setTimeout(connectToNotificationStream, 5000);
+                };
+            }
+
+            // --- Fungsi Data Historis ---
             async function fetchData(selectedDateStr) {
                 if (!selectedDateStr) return;
 
@@ -21,7 +57,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 noDataMessage.style.display = 'none';
 
                 try {
-                    // Placeholder: Ganti dengan URL endpoint Anda
                     const response = await fetch(`/data?date=${selectedDateStr}`);
                     if (!response.ok) throw new Error(`Gagal mengambil data: ${response.statusText}`);
                     
@@ -37,9 +72,9 @@ document.addEventListener("DOMContentLoaded", function () {
                         tableCaption.textContent = `Data terakhir pada pukul ${rowData.waktu.split(' ')[1]}`;
                         const tr = document.createElement('tr');
                         
-                        const dryer1 = rowData.dryer1 !== null ? `${rowData.dryer1}°C` : 'N/A';
-                        const dryer2 = rowData.dryer2 !== null ? `${rowData.dryer2}°C` : 'N/A';
-                        const dryer3 = rowData.dryer3 !== null ? `${rowData.dryer3}°C` : 'N/A';
+                        const dryer1 = rowData.dryer1 !== null ? `${rowData.dryer1.toFixed(1)}°C` : 'N/A';
+                        const dryer2 = rowData.dryer2 !== null ? `${rowData.dryer2.toFixed(1)}°C` : 'N/A';
+                        const dryer3 = rowData.dryer3 !== null ? `${rowData.dryer3.toFixed(1)}°C` : 'N/A';
                         
                         tr.innerHTML = `<td>${rowData.waktu.split(' ')[1]}</td><td>${dryer1}</td><td>${dryer2}</td><td>${dryer3}</td>`;
                         tableBody.appendChild(tr);
@@ -52,10 +87,8 @@ document.addEventListener("DOMContentLoaded", function () {
                 }
             }
 
-            // --- Fungsi Inisialisasi Datepicker (digabung dengan logika tema) ---
             function initFlatpickr(theme) {
                 if (datepickerInstance) datepickerInstance.destroy();
-                
                 let config = {
                     dateFormat: "Y-m-d",
                     defaultDate: "today",
@@ -64,15 +97,20 @@ document.addEventListener("DOMContentLoaded", function () {
                     }
                 };
                 if (theme === 'dark') config.theme = 'dark';
-                
                 datepickerInstance = flatpickr("#datePicker", config);
             }
 
-            // --- Fungsi untuk Menerapkan Tema ---
+            // --- Fungsi Utilitas & Tema ---
+            const setupNavigation = () => {
+                const currentPath = window.location.pathname;
+                locationText.textContent = currentPath.includes('/dwidaya') ? 'Ke Wijaya' : 'Ke Dwidaya';
+                locationToggle.href = currentPath.includes('/dwidaya') ? '/' : '/dwidaya';
+            };
+
             const applyTheme = (theme) => {
                 htmlElement.setAttribute("data-bs-theme", theme);
                 themeText.textContent = theme === "dark" ? "Light Mode" : "Dark Mode";
-                initFlatpickr(theme);
+                initFlatpickr(theme); // Perbarui tema datepicker juga
             };
 
             // --- Event Listeners ---
@@ -84,21 +122,23 @@ document.addEventListener("DOMContentLoaded", function () {
 
             downloadBtn.addEventListener('click', function() {
                 const selectedDate = datepickerInstance.input.value;
-                if (!selectedDate) {
-                    console.error('Tanggal tidak valid.');
-                    return;
+                if (selectedDate) {
+                    window.open(`/download?date=${selectedDate}`, '_blank');
+                } else {
+                    console.error('Tanggal tidak valid untuk diunduh.');
                 }
-                window.open(`/download?date=${selectedDate}`, '_blank');
             });
             
-            // --- Inisialisasi Awal ---
-            const savedTheme = localStorage.getItem("theme") || htmlElement.getAttribute('data-bs-theme');
+            // --- INISIALISASI SAAT HALAMAN DIMUAT ---
+            const savedTheme = localStorage.getItem("theme") || 'dark';
             applyTheme(savedTheme);
+            setupNavigation();
+            connectToNotificationStream();
 
-            // Muat data awal untuk hari ini setelah inisialisasi
+            // Muat data awal untuk hari ini
             setTimeout(() => {
                 if (datepickerInstance && datepickerInstance.input) {
                     fetchData(datepickerInstance.input.value);
                 }
-            }, 100); // Timeout singkat memastikan datepicker sudah siap
+            }, 100);
         });
