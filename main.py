@@ -726,6 +726,7 @@ class TemperatureMonitor:
                 return redirect(url_for('login', next=request.url))
             return redirect(url_for('login'))
 
+        # Index.html
         @app.route("/")
         @login_required
         @check_session_timeout  
@@ -740,6 +741,22 @@ class TemperatureMonitor:
                 }
             return render_template("index.html", **context)
         
+
+        # Dwidaya
+        @app.route("/dwidaya")
+        @login_required
+        @check_session_timeout  
+        def dwidaya():
+            with self.data_lock:
+                context = {
+                    "current_suhu_1": f"{self.latest_temperatures['dryer1']:.1f} °C" if self.latest_temperatures['dryer1'] else "N/A",
+                    "current_suhu_2": f"{self.latest_temperatures['dryer2']:.1f} °C" if self.latest_temperatures['dryer2'] else "N/A",
+                    "current_suhu_3": f"{self.latest_temperatures['dryer3']:.1f} °C" if self.latest_temperatures['dryer3'] else "N/A",
+                    "current_time": self.config.format_indonesia_time(),
+                    "timezone": str(self.config.INDONESIA_TZ)
+                }
+            return render_template("dwidaya.html", **context)
+
         @app.route('/login', methods=['GET', 'POST'])
         def login():
             if current_user.is_authenticated:
