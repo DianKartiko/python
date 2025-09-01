@@ -867,48 +867,37 @@ class TemperatureMonitor:
         @login_required
         def get_chart_data():
             """
-            Menyediakan data suhu untuk 24 jam terakhir dalam format
-            yang siap digunakan oleh Chart.js.
+            Menyediakan data suhu untuk tanggal yang dipilih (dari parameter 'date')
+            dalam format yang siap digunakan oleh Chart.js.
             """
             try:
-                # Tentukan rentang waktu (24 jam dari sekarang)
-                conn = self.db_manager.get_connection()
-                c = conn.cursor()
-                
-                since_time = datetime.datetime.now() - datetime.timedelta(hours=24)
-                since_time_str = since_time.strftime("%Y-%m-%d %H:%M:%S")
+                # 1. Ambil parameter 'date' dari request. Jika tidak ada, gunakan tanggal hari ini.
+                selected_date = request.args.get('date', self.config.get_indonesia_time().strftime('%Y-%m-%d'))
 
-                # Ambil data dari database
-                c.execute("""
-                    SELECT strftime('%H:%M', waktu), dryer_id, suhu 
-                    FROM suhu 
-                    WHERE waktu >= ? 
-                    ORDER BY waktu ASC
-                """, (since_time_str,))
-                rows = c.fetchall()
-                conn.close()
+                # 2. Gunakan metode yang sudah ada untuk mengambil data harian yang sudah di-pivot
+                rows = self.db_manager.get_data_by_date_pivoted(selected_date)
 
                 if not rows:
+                    # Kirim data kosong jika tidak ada record pada tanggal tersebut
                     return jsonify({"labels": [], "datasets": []})
 
-                # Proses pivot data
+                # 3. Proses data untuk format Chart.js
                 labels = []
-                data_points = {} # Format: { "14:30": {"dryer1": 150.1, "dryer2": 152.3}, ... }
+                dryer1_data = []
+                dryer2_data = []
+                dryer3_data = []
 
                 for row in rows:
-                    waktu, dryer_id, suhu = row
-                    if waktu not in data_points:
-                        data_points[waktu] = { "dryer1": None, "dryer2": None, "dryer3": None }
-                        labels.append(waktu)
+                    # row[0] formatnya "YYYY-MM-DD HH:MM:SS", kita hanya butuh waktunya
+                    waktu = row[0].split(' ')[1][:5] # Ambil HH:MM
+                    labels.append(waktu)
                     
-                    if dryer_id in data_points[waktu]:
-                        data_points[waktu][dryer_id] = suhu
+                    # row[1] = dryer1_suhu, row[2] = dryer2_suhu, dst.
+                    dryer1_data.append(row[1])
+                    dryer2_data.append(row[2])
+                    dryer3_data.append(row[3])
 
-                # Siapkan dataset untuk Chart.js
-                dryer1_data = [data_points[t].get('dryer1') for t in labels]
-                dryer2_data = [data_points[t].get('dryer2') for t in labels]
-                dryer3_data = [data_points[t].get('dryer3') for t in labels]
-
+                # 4. Susun data dalam struktur JSON yang diharapkan oleh frontend
                 chart_data = {
                     "labels": labels,
                     "datasets": [
@@ -918,7 +907,7 @@ class TemperatureMonitor:
                             "borderColor": "rgba(255, 99, 132, 1)",
                             "backgroundColor": "rgba(255, 99, 132, 0.2)",
                             "fill": True,
-                            "tension": 0.4 # Membuat garis lebih melengkung
+                            "tension": 0.4
                         },
                         {
                             "label": "Dryer 2",

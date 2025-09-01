@@ -57,8 +57,10 @@ document.addEventListener("DOMContentLoaded", function () {
       dateFormat: "Y-m-d",
       defaultDate: "today",
       onChange: function (selectedDates, dateStr) {
+        // Panggil fungsi untuk update tabel
         fetchData(dateStr);
-        fetchChartData(dateStr);
+        // Panggil fungsi untuk update chart dengan tema yang sedang aktif
+        renderChart(htmlElement.getAttribute("data-bs-theme"));
       },
     };
     if (theme === "dark") config.theme = "dark";
@@ -156,14 +158,19 @@ document.addEventListener("DOMContentLoaded", function () {
   // --- Fungsi untuk merender Chart ---
   async function renderChart(theme) {
     try {
-      // Ambil data dari endpoint baru kita
-      const response = await fetch("/chart-data");
+      // 1. Ambil tanggal yang dipilih saat ini dari input datepicker
+      const selectedDate = datepickerInstance.input.value;
+      if (!selectedDate) return; // Jangan lakukan apa-apa jika tidak ada tanggal
+
+      // 2. Lakukan fetch ke endpoint dengan menyertakan tanggal sebagai query parameter
+      const response = await fetch(`/chart-data?date=${selectedDate}`);
       if (!response.ok) {
         throw new Error(`Gagal mengambil data chart: ${response.statusText}`);
       }
       const chartData = await response.json();
 
-      // Tentukan warna berdasarkan tema
+      // ... (sisa kode di dalam fungsi ini tetap sama)
+
       const isDarkMode = theme === "dark";
       const gridColor = isDarkMode
         ? "rgba(255, 255, 255, 0.1)"
@@ -172,15 +179,13 @@ document.addEventListener("DOMContentLoaded", function () {
 
       const ctx = document.getElementById("temperatureChart").getContext("2d");
 
-      // Jika chart sudah ada, hancurkan dulu untuk menggambar ulang (berguna saat ganti tema)
       if (temperatureChart) {
         temperatureChart.destroy();
       }
 
-      // Buat chart baru
       temperatureChart = new Chart(ctx, {
-        type: "line", // Tipe chart
-        data: chartData, // Data dari server
+        type: "line",
+        data: chartData,
         options: {
           responsive: true,
           maintainAspectRatio: false,
@@ -203,7 +208,6 @@ document.addEventListener("DOMContentLoaded", function () {
               },
               ticks: {
                 color: textColor,
-                // Format ticks agar ada '°C'
                 callback: function (value) {
                   return value + "°C";
                 },
@@ -221,7 +225,6 @@ document.addEventListener("DOMContentLoaded", function () {
       });
     } catch (error) {
       console.error("Gagal merender chart:", error);
-      // Anda bisa menampilkan pesan error di UI di sini
     }
   }
 
