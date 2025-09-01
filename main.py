@@ -808,6 +808,32 @@ class TemperatureMonitor:
             flash('You have been logged out successfully.', 'info')
             return redirect(url_for('login'))
         
+        # ---- Route untuk stream data secara real-time
+        @app.route('/stream-data')
+        @login_required
+        def stream_data():
+            def generate_data():
+                while True:
+                    # Ambil data suhu terbaru dari memori secara thread-safe
+                    with self.data_lock:
+                        latest_temps = self.latest_temperatures.copy()
+
+                    # Format data untuk dikirim sebagai JSON
+                    data_payload = {
+                        "dryer1": f"{latest_temps['dryer1']:.1f}" if latest_temps['dryer1'] is not None else "N/A",
+                        "dryer2": f"{latest_temps['dryer2']:.1f}" if latest_temps['dryer2'] is not None else "N/A",
+                        "dryer3": f"{latest_temps['dryer3']:.1f}" if latest_temps['dryer3'] is not None else "N/A",
+                        "time": self.config.format_indonesia_time()
+                    }
+                    
+                    # Kirim data dalam format Server-Sent Event (SSE)
+                    yield f"data: {json.dumps(data_payload)}\n\n"
+                    
+                    # Tunggu 1 detik sebelum mengirim data berikutnya
+                    time.sleep(1)
+                    
+                return Response(generate_data(), mimetype='text/event-stream')
+        
         @app.route("/data")
         def get_data_api():
             selected_date = request.args.get('date')
