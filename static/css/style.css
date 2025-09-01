@@ -1,174 +1,174 @@
 /* Gaya dasar agar konten tidak melompat saat tema berganti */
 body {
-    transition: background-color 0.3s ease, color 0.3s ease;
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .profile-settings {
-    position: fixed;
-    top: 1rem;
-    right: 1.5rem;
-    z-index: 1050;
+  position: fixed;
+  top: 1rem;
+  right: 1.5rem;
+  z-index: 1050;
 }
 
 .dropdown-menu .dropdown-item {
-    cursor: pointer;
+  cursor: pointer;
 }
 
 /* Logika untuk menampilkan/menyembunyikan ikon tema */
 html[data-bs-theme="light"] #theme-icon-moon,
 html[data-bs-theme="dark"] #theme-icon-sun {
-    display: none;
+  display: none;
 }
 
 html[data-bs-theme="dark"] #theme-icon-moon,
 html[data-bs-theme="light"] #theme-icon-sun {
-    display: inline-block;
+  display: inline-block;
 }
 
 /* --- GAYA KUSTOM HANYA UNTUK DARK THEME --- */
 html[data-bs-theme="dark"] body {
-    background-color: #030712;
-    color: #d1d5db;
+  background-color: #030712;
+  color: #d1d5db;
 }
 
 html[data-bs-theme="dark"] .card {
-    background-color: #111827;
-    border: 1px solid #374151;
+  background-color: #111827;
+  border: 1px solid #374151;
 }
 
 html[data-bs-theme="dark"] .card-header,
 html[data-bs-theme="dark"] .card-footer {
-    background-color: #1f2937;
-    border-color: #374151;
+  background-color: #1f2937;
+  border-color: #374151;
 }
 
 html[data-bs-theme="dark"] .dropdown-menu {
-    background-color: #1f2937;
-    border: 1px solid #374151;
+  background-color: #1f2937;
+  border: 1px solid #374151;
 }
 
 html[data-bs-theme="dark"] .dropdown-item {
-    color: #d1d5db;
+  color: #d1d5db;
 }
 
 html[data-bs-theme="dark"] .dropdown-item:hover {
-    background-color: #374151;
-    color: #fff;
+  background-color: #374151;
+  color: #fff;
 }
 
 html[data-bs-theme="dark"] .dropdown-divider {
-    border-top: 1px solid #374151;
+  border-top: 1px solid #374151;
 }
 
 html[data-bs-theme="dark"] .dropdown-item.text-danger:hover {
-    color: #fff !important;
-    background-color: #dc3545;
+  color: #fff !important;
+  background-color: #dc3545;
 }
 
 html[data-bs-theme="dark"] .list-group-item {
-    background-color: transparent;
-    border-color: #374151;
+  background-color: transparent;
+  border-color: #374151;
 }
 
 html[data-bs-theme="dark"] .list-group-flush .list-group-item span {
-    color: #f3f4f6;
+  color: #f3f4f6;
 }
 
 html[data-bs-theme="dark"] .temp-card {
-    background-color: #1f2937;
-    border: 1px solid #374151;
+  background-color: #1f2937;
+  border: 1px solid #374151;
 }
 
 .temp-card.border-primary {
-    border-left: 4px solid #0d6efd;
+  border-left: 4px solid #0d6efd;
 }
 
 .temp-card.border-warning {
-    border-left: 4px solid #ffc107;
+  border-left: 4px solid #ffc107;
 }
 
 .temp-card.border-danger {
-    border-left: 4px solid #dc3545;
+  border-left: 4px solid #dc3545;
 }
 
 .temp-reading {
-    font-size: 1.75rem;
-    font-weight: bold;
+  font-size: 1.75rem;
+  font-weight: bold;
 }
 
 html[data-bs-theme="dark"] .text-muted {
-    color: #6b7280 !important;
+  color: #6b7280 !important;
 }
 
 html[data-bs-theme="dark"] .form-control {
-    background-color: #1f2937;
-    border-color: #4b5563;
-    color: #f3f4f6;
+  background-color: #1f2937;
+  border-color: #4b5563;
+  color: #f3f4f6;
 }
 
 html[data-bs-theme="dark"] .form-control:focus {
-    background-color: #1f2937;
-    border-color: #3b82f6;
-    box-shadow: none;
+  background-color: #1f2937;
+  border-color: #3b82f6;
+  box-shadow: none;
 }
 
 html[data-bs-theme="dark"] .form-control[readonly] {
-    background-color: #1f2937 !important;
+  background-color: #1f2937 !important;
 }
 
 .flatpickr-calendar.dark {
-    background: #1f2937;
-    border: 1px solid #4b5563;
+  background: #1f2937;
+  border: 1px solid #4b5563;
 }
 
 /* === PERBAIKAN: GAYA TABEL UNTUK DARK MODE === */
 html[data-bs-theme="dark"] .table {
-    color: #d1d5db;
-    border-color: #374151;
+  color: #d1d5db;
+  border-color: #374151;
 }
 
 html[data-bs-theme="dark"] .table thead th {
-    color: #f3f4f6;
-    background-color: #374151;
-    border-color: #4b5563;
+  color: #f3f4f6;
+  background-color: #374151;
+  border-color: #4b5563;
 }
 
-html[data-bs-theme="dark"] .table-striped>tbody>tr:nth-of-type(odd)>* {
-    --bs-table-accent-bg: rgba(255, 255, 255, 0.05);
-    color: #d1d5db;
+html[data-bs-theme="dark"] .table-striped > tbody > tr:nth-of-type(odd) > * {
+  --bs-table-accent-bg: rgba(255, 255, 255, 0.05);
+  color: #d1d5db;
 }
 
-html[data-bs-theme="dark"] .table-hover>tbody>tr:hover>* {
-    --bs-table-accent-bg: rgba(255, 255, 255, 0.075);
-    color: #fff;
+html[data-bs-theme="dark"] .table-hover > tbody > tr:hover > * {
+  --bs-table-accent-bg: rgba(255, 255, 255, 0.075);
+  color: #fff;
 }
 
 html[data-bs-theme="dark"] .btn-success {
-    background-color: #166534;
-    border-color: #166534;
-    color: #f0fdf4;
+  background-color: #166534;
+  border-color: #166534;
+  color: #f0fdf4;
 }
 
 html[data-bs-theme="dark"] .btn-success:hover {
-    background-color: #15803d;
-    border-color: #15803d;
+  background-color: #15803d;
+  border-color: #15803d;
 }
 
 /* === AKHIR PERBAIKAN === */
 
 /* GAYA NOTIFIKASI TOAST UNTUK DARK MODE */
 html[data-bs-theme="dark"] .toast {
-    background-color: #1f2937;
-    color: #d1d5db;
-    border: 1px solid #374151;
+  background-color: #1f2937;
+  color: #d1d5db;
+  border: 1px solid #374151;
 }
 
 html[data-bs-theme="dark"] .toast-header {
-    background-color: #374151;
-    color: #f3f4f6;
-    border-bottom: 1px solid #4b5563;
+  background-color: #374151;
+  color: #f3f4f6;
+  border-bottom: 1px solid #4b5563;
 }
 
 html[data-bs-theme="dark"] .btn-close {
-    filter: invert(1) grayscale(100%) brightness(200%);
+  filter: invert(1) grayscale(100%) brightness(200%);
 }

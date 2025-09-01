@@ -11,164 +11,6 @@ document.addEventListener("DOMContentLoaded", function () {
   const tableCaption = document.getElementById("tableCaption");
   let datepickerInstance = null;
 
-  // Elemen untuk data real-time
-  const tempElement1 = document.getElementById("current_suhu_1");
-  const tempElement2 = document.getElementById("current_suhu_2");
-  const tempElement3 = document.getElementById("current_suhu_3");
-  const timeElement = document.getElementById("current_time");
-
-  // Elemen dan variabel untuk Chart
-  const chartCanvas = document.getElementById("temperatureChart");
-  let tempChart = null;
-
-  // --- Fungsi Notifikasi & Stream Notifikasi ---
-  function showNotification(title, message) {
-    const toastContainer = document.querySelector(".toast-container");
-    if (!toastContainer) return;
-    const toastId = "toast-" + Math.random().toString(36).substring(2, 9);
-    const toastHTML = `
-      <div id="${toastId}" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
-        <div class="toast-header">
-          <i class="bi bi-bell-fill me-2"></i>
-          <strong class="me-auto">${title}</strong>
-          <small>Baru saja</small>
-          <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
-        </div>
-        <div class="toast-body">${message}</div>
-      </div>`;
-    toastContainer.insertAdjacentHTML("beforeend", toastHTML);
-    const toastElement = document.getElementById(toastId);
-    const toast = new bootstrap.Toast(toastElement);
-    toastElement.addEventListener("hidden.bs.toast", () =>
-      toastElement.remove()
-    );
-    toast.show();
-  }
-
-  function connectToNotificationStream() {
-    const eventSource = new EventSource("/stream-notifications");
-    eventSource.onmessage = function (event) {
-      const notification = JSON.parse(event.data);
-      showNotification(notification.title, notification.message);
-    };
-    eventSource.onerror = function (err) {
-      console.error(
-        "Koneksi stream notifikasi gagal, mencoba lagi dalam 5 detik...",
-        err
-      );
-      eventSource.close();
-      setTimeout(connectToNotificationStream, 5000);
-    };
-  }
-
-  // --- Stream untuk update suhu real-time ---
-  function connectToDataStream() {
-    const eventSource = new EventSource("/stream-data");
-    eventSource.onmessage = function (event) {
-      const data = JSON.parse(event.data);
-      if (tempElement1)
-        tempElement1.textContent =
-          data.dryer1 !== "N/A" ? data.dryer1 + " °C" : "N/A";
-      if (tempElement2)
-        tempElement2.textContent =
-          data.dryer2 !== "N/A" ? data.dryer2 + " °C" : "N/A";
-      if (tempElement3)
-        tempElement3.textContent =
-          data.dryer3 !== "N/A" ? data.dryer3 + " °C" : "N/A";
-      if (timeElement) timeElement.textContent = data.time;
-    };
-    eventSource.onerror = function (err) {
-      console.error(
-        "Koneksi stream data gagal, mencoba lagi dalam 5 detik...",
-        err
-      );
-      eventSource.close();
-      setTimeout(connectToDataStream, 5000);
-    };
-  }
-
-  // --- Fungsi untuk Chart ---
-  function renderChart(chartData, theme) {
-    if (!chartCanvas) return;
-    const ctx = chartCanvas.getContext("2d");
-    if (tempChart) {
-      tempChart.destroy();
-    }
-
-    const isDark = theme === "dark";
-    const gridColor = isDark
-      ? "rgba(255, 255, 255, 0.1)"
-      : "rgba(0, 0, 0, 0.1)";
-    const textColor = isDark ? "#adb5bd" : "#495057";
-
-    const colors = {
-      "Dryer 1": {
-        border: "rgba(54, 162, 235, 0.9)",
-        area: isDark ? "rgba(54, 162, 235, 0.2)" : "rgba(54, 162, 235, 0.3)",
-      },
-      "Dryer 2": {
-        border: "rgba(255, 159, 64, 0.9)",
-        area: isDark ? "rgba(255, 159, 64, 0.2)" : "rgba(255, 159, 64, 0.3)",
-      },
-      "Dryer 3": {
-        border: "rgba(255, 99, 132, 0.9)",
-        area: isDark ? "rgba(255, 99, 132, 0.2)" : "rgba(255, 99, 132, 0.3)",
-      },
-    };
-
-    const datasets = chartData.datasets.map((ds) => ({
-      label: ds.label,
-      data: ds.data,
-      borderColor: colors[ds.label].border,
-      backgroundColor: colors[ds.label].area,
-      fill: true,
-      tension: 0.4,
-      pointRadius: 0,
-      borderWidth: 2,
-    }));
-
-    tempChart = new Chart(ctx, {
-      type: "line",
-      data: { labels: chartData.labels, datasets: datasets },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { intersect: false, mode: "index" },
-        plugins: { legend: { labels: { color: textColor } } },
-        scales: {
-          x: {
-            type: "time",
-            time: {
-              unit: "hour",
-              tooltipFormat: "yyyy-MM-dd HH:mm",
-              displayFormats: { hour: "HH:mm" },
-            },
-            ticks: { color: textColor },
-            grid: { color: gridColor },
-          },
-          y: {
-            ticks: { color: textColor },
-            grid: { color: gridColor },
-            title: { display: true, text: "Suhu (°C)", color: textColor },
-          },
-        },
-      },
-    });
-  }
-
-  async function fetchChartData(selectedDateStr) {
-    try {
-      const response = await fetch(`/chart-data?date=${selectedDateStr}`);
-      if (!response.ok) throw new Error("Data chart tidak tersedia");
-      const chartData = await response.json();
-      const currentTheme = htmlElement.getAttribute("data-bs-theme") || "dark";
-      renderChart(chartData, currentTheme);
-    } catch (error) {
-      console.error("Gagal mengambil data chart:", error);
-      if (tempChart) tempChart.destroy();
-    }
-  }
-
   // --- Fungsi Data Historis untuk Tabel ---
   async function fetchData(selectedDateStr) {
     if (!selectedDateStr) return;
@@ -226,12 +68,22 @@ document.addEventListener("DOMContentLoaded", function () {
   // --- Fungsi Tema ---
   const applyTheme = (theme) => {
     htmlElement.setAttribute("data-bs-theme", theme);
-    if (themeText)
-      themeText.textContent = theme === "dark" ? "Light Mode" : "Dark Mode";
-    initFlatpickr(theme);
-    if (datepickerInstance && datepickerInstance.input.value) {
-      fetchChartData(datepickerInstance.input.value);
+    if (themeText) {
+      const themeIconSun = document.getElementById("theme-icon-sun");
+      const themeIconMoon = document.getElementById("theme-icon-moon");
+      if (theme === "dark") {
+        themeText.textContent = "Light Mode";
+        if (themeIconSun) themeIconSun.style.display = "inline-block";
+        if (themeIconMoon) themeIconMoon.style.display = "none";
+      } else {
+        themeText.textContent = "Dark Mode";
+        if (themeIconSun) themeIconSun.style.display = "none";
+        if (themeIconMoon) themeIconMoon.style.display = "inline-block";
+      }
     }
+    initFlatpickr(theme);
+    // **BARIS PENTING**: Render ulang chart dengan tema baru
+    renderChart(theme);
   };
 
   // --- Event Listeners ---
@@ -259,15 +111,126 @@ document.addEventListener("DOMContentLoaded", function () {
   const savedTheme = localStorage.getItem("theme") || "dark";
   applyTheme(savedTheme);
 
-  connectToNotificationStream();
-  connectToDataStream();
+  // --- Fungsi untuk terhubung ke Stream Data Real-time ---
+  function connectToDataStream() {
+    // Ambil elemen-elemen yang akan diupdate
+    const suhu1Element = document.getElementById("current_suhu_1");
+    const suhu2Element = document.getElementById("current_suhu_2");
+    const suhu3Element = document.getElementById("current_suhu_3");
 
+    // Buat koneksi EventSource ke endpoint stream di Flask
+    const eventSource = new EventSource("/stream-data");
+
+    // Definisikan apa yang harus dilakukan ketika pesan diterima
+    eventSource.onmessage = function (event) {
+      // Parse data JSON yang diterima dari server
+      const data = JSON.parse(event.data);
+
+      // Update elemen HTML dengan data baru
+      // Cek apakah elemennya ada sebelum mengubah isinya
+      if (suhu1Element) {
+        suhu1Element.textContent =
+          data.dryer1 !== "N/A" ? `${data.dryer1}°C` : "N/A";
+      }
+      if (suhu2Element) {
+        suhu2Element.textContent =
+          data.dryer2 !== "N/A" ? `${data.dryer2}°C` : "N/A";
+      }
+      if (suhu3Element) {
+        suhu3Element.textContent =
+          data.dryer3 !== "N/A" ? `${data.dryer3}°C` : "N/A";
+      }
+    };
+
+    // Handle jika terjadi error koneksi
+    eventSource.onerror = function (err) {
+      console.error("EventSource failed:", err);
+      // Bisa tambahkan logika untuk mencoba koneksi ulang di sini
+      eventSource.close(); // Tutup koneksi yang error
+    };
+  }
+
+  // Variabel global untuk menyimpan instance chart
+  let temperatureChart = null;
+
+  // --- Fungsi untuk merender Chart ---
+  async function renderChart(theme) {
+    try {
+      // Ambil data dari endpoint baru kita
+      const response = await fetch("/chart-data");
+      if (!response.ok) {
+        throw new Error(`Gagal mengambil data chart: ${response.statusText}`);
+      }
+      const chartData = await response.json();
+
+      // Tentukan warna berdasarkan tema
+      const isDarkMode = theme === "dark";
+      const gridColor = isDarkMode
+        ? "rgba(255, 255, 255, 0.1)"
+        : "rgba(0, 0, 0, 0.1)";
+      const textColor = isDarkMode ? "#e9ecef" : "#495057";
+
+      const ctx = document.getElementById("temperatureChart").getContext("2d");
+
+      // Jika chart sudah ada, hancurkan dulu untuk menggambar ulang (berguna saat ganti tema)
+      if (temperatureChart) {
+        temperatureChart.destroy();
+      }
+
+      // Buat chart baru
+      temperatureChart = new Chart(ctx, {
+        type: "line", // Tipe chart
+        data: chartData, // Data dari server
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {
+            mode: "index",
+            intersect: false,
+          },
+          scales: {
+            x: {
+              grid: {
+                color: gridColor,
+              },
+              ticks: {
+                color: textColor,
+              },
+            },
+            y: {
+              grid: {
+                color: gridColor,
+              },
+              ticks: {
+                color: textColor,
+                // Format ticks agar ada '°C'
+                callback: function (value) {
+                  return value + "°C";
+                },
+              },
+            },
+          },
+          plugins: {
+            legend: {
+              labels: {
+                color: textColor,
+              },
+            },
+          },
+        },
+      });
+    } catch (error) {
+      console.error("Gagal merender chart:", error);
+      // Anda bisa menampilkan pesan error di UI di sini
+    }
+  }
+
+  connectToDataStream(); // Fungsi yang baru saja kita buat
   // Muat data awal untuk hari ini
   setTimeout(() => {
     if (datepickerInstance && datepickerInstance.input) {
       const today = datepickerInstance.input.value;
       fetchData(today);
-      fetchChartData(today);
     }
   }, 100);
 });

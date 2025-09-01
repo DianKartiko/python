@@ -749,7 +749,6 @@ class TemperatureMonitor:
                     "timezone": str(self.config.INDONESIA_TZ)
                 }
             return render_template("index.html", **context)
-        
 
         # Dwidaya
         @app.route("/dwidaya")
@@ -808,31 +807,142 @@ class TemperatureMonitor:
             flash('You have been logged out successfully.', 'info')
             return redirect(url_for('login'))
         
-        # ---- Route untuk stream data secara real-time
-        @app.route('/stream-data')
+            def generate():
+                try:
+                    while True:
+                        try:
+                            # Ambil notifikasi dari antrean dengan timeout
+                            notification = self.notification_queue.get(timeout=30)  # 30 detik timeout
+                            # Format sebagai Server-Sent Event (SSE)
+                            yield f"data: {json.dumps(notification)}\n\n"
+                            self.notification_queue.task_done()
+                        except Empty:
+                            # Kirim heartbeat setiap 30 detik untuk menjaga koneksi
+                            yield f"data: {json.dumps({'heartbeat': True})}\n\n"
+                        except Exception as e:
+                            logger.error(f"Error in notification stream: {e}")
+                            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                            time.sleep(1)
+                except Exception as e:
+                    logger.error(f"Fatal error in notification stream: {e}")
+                    yield f"data: {json.dumps({'error': 'Stream terminated'})}\n\n"
+            
+            return Response(generate(), mimetype='text/event-stream')
+
+        # ---- Stream Data
+        @app.route("/stream-data")
         @login_required
         def stream_data():
             def generate_data():
-                while True:
-                    # Ambil data suhu terbaru dari memori secara thread-safe
-                    with self.data_lock:
-                        latest_temps = self.latest_temperatures.copy()
+                """
+                Generator function yang akan mengirim data suhu terbaru.
+                """
+                try:
+                    while True:
+                        # Ambil data suhu terbaru dari memori
+                        with self.data_lock:
+                            latest_temps = self.latest_temperatures.copy()
 
-                    # Format data untuk dikirim sebagai JSON
-                    data_payload = {
-                        "dryer1": f"{latest_temps['dryer1']:.1f}" if latest_temps['dryer1'] is not None else "N/A",
-                        "dryer2": f"{latest_temps['dryer2']:.1f}" if latest_temps['dryer2'] is not None else "N/A",
-                        "dryer3": f"{latest_temps['dryer3']:.1f}" if latest_temps['dryer3'] is not None else "N/A",
-                        "time": self.config.format_indonesia_time()
-                    }
+                        # Format data menjadi JSON
+                        data_payload = {
+                            "dryer1": f"{latest_temps['dryer1']:.1f}" if latest_temps['dryer1'] is not None else "N/A",
+                            "dryer2": f"{latest_temps['dryer2']:.1f}" if latest_temps['dryer2'] is not None else "N/A",
+                            "dryer3": f"{latest_temps['dryer3']:.1f}" if latest_temps['dryer3'] is not None else "N/A",
+                        }
+                        
+                        # Kirim data dalam format SSE: "data: <json_string>\n\n"
+                        yield f"data: {json.dumps(data_payload)}\n\n"
+                        
+                        # Tunggu sebentar sebelum mengirim data berikutnya untuk efisiensi
+                        time.sleep(2) # Kirim update setiap 2 detik
+                except GeneratorExit:
+                    # Ini akan terjadi jika klien menutup koneksi
+                    logger.info("Koneksi stream data ditutup oleh klien.")
+
+            # Kembalikan response dengan tipe mimetype 'text/event-stream'
+            return Response(generate_data(), mimetype='text/event-stream')
+        
+        # --- CHART Requirements
+        @app.route("/chart-data")
+        @login_required
+        def get_chart_data():
+            """
+            Menyediakan data suhu untuk 24 jam terakhir dalam format
+            yang siap digunakan oleh Chart.js.
+            """
+            try:
+                # Tentukan rentang waktu (24 jam dari sekarang)
+                conn = self.db_manager.get_connection()
+                c = conn.cursor()
+                
+                since_time = datetime.datetime.now() - datetime.timedelta(hours=24)
+                since_time_str = since_time.strftime("%Y-%m-%d %H:%M:%S")
+
+                # Ambil data dari database
+                c.execute("""
+                    SELECT strftime('%H:%M', waktu), dryer_id, suhu 
+                    FROM suhu 
+                    WHERE waktu >= ? 
+                    ORDER BY waktu ASC
+                """, (since_time_str,))
+                rows = c.fetchall()
+                conn.close()
+
+                if not rows:
+                    return jsonify({"labels": [], "datasets": []})
+
+                # Proses pivot data
+                labels = []
+                data_points = {} # Format: { "14:30": {"dryer1": 150.1, "dryer2": 152.3}, ... }
+
+                for row in rows:
+                    waktu, dryer_id, suhu = row
+                    if waktu not in data_points:
+                        data_points[waktu] = { "dryer1": None, "dryer2": None, "dryer3": None }
+                        labels.append(waktu)
                     
-                    # Kirim data dalam format Server-Sent Event (SSE)
-                    yield f"data: {json.dumps(data_payload)}\n\n"
-                    
-                    # Tunggu 1 detik sebelum mengirim data berikutnya
-                    time.sleep(1)
-                    
-                return Response(generate_data(), mimetype='text/event-stream')
+                    if dryer_id in data_points[waktu]:
+                        data_points[waktu][dryer_id] = suhu
+
+                # Siapkan dataset untuk Chart.js
+                dryer1_data = [data_points[t].get('dryer1') for t in labels]
+                dryer2_data = [data_points[t].get('dryer2') for t in labels]
+                dryer3_data = [data_points[t].get('dryer3') for t in labels]
+
+                chart_data = {
+                    "labels": labels,
+                    "datasets": [
+                        {
+                            "label": "Dryer 1",
+                            "data": dryer1_data,
+                            "borderColor": "rgba(255, 99, 132, 1)",
+                            "backgroundColor": "rgba(255, 99, 132, 0.2)",
+                            "fill": True,
+                            "tension": 0.4 # Membuat garis lebih melengkung
+                        },
+                        {
+                            "label": "Dryer 2",
+                            "data": dryer2_data,
+                            "borderColor": "rgba(54, 162, 235, 1)",
+                            "backgroundColor": "rgba(54, 162, 235, 0.2)",
+                            "fill": True,
+                            "tension": 0.4
+                        },
+                        {
+                            "label": "Dryer 3",
+                            "data": dryer3_data,
+                            "borderColor": "rgba(75, 192, 192, 1)",
+                            "backgroundColor": "rgba(75, 192, 192, 0.2)",
+                            "fill": True,
+                            "tension": 0.4
+                        }
+                    ]
+                }
+                return jsonify(chart_data)
+
+            except Exception as e:
+                logger.error(f"Error getting chart data: {e}")
+                return jsonify({"error": str(e)}), 500
         
         @app.route("/data")
         def get_data_api():
@@ -862,23 +972,6 @@ class TemperatureMonitor:
         def keepalive():
             return {"status": "alive", "timestamp": self.config.format_indonesia_time()}
         
-
-        # === ENDPOINT BARU: Stream Notifikasi Otomatis ===
-        @app.route('/stream-notifications')
-        @login_required
-        def stream_notifications():
-            def generate():
-                while True:
-                    try:
-                        # Ambil notifikasi dari antrean, tunggu hingga ada
-                        notification = self.notification_queue.get(timeout=None)
-                        # Format sebagai Server-Sent Event (SSE)
-                        yield f"data: {json.dumps(notification)}\n\n"
-                    except Exception as e:
-                        logger.error(f"Error in notification stream: {e}")
-                        time.sleep(1)
-            return Response(generate(), mimetype='text/event-stream')
-        # === AKHIR ENDPOINT BARU ===
 
         @app.route("/test-telegram")
         def test_telegram():
