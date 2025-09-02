@@ -172,3 +172,13 @@ html[data-bs-theme="dark"] .toast-header {
 html[data-bs-theme="dark"] .btn-close {
   filter: invert(1) grayscale(100%) brightness(200%);
 }
+
+/* Nav Pills Custom Style for Dark Theme */
+html[data-bs-theme="dark"] .nav-pills .nav-link {
+  color: #d1d5db;
+}
+
+html[data-bs-theme="dark"] .nav-pills .nav-link.active {
+  background-color: #3b82f6; /* A bright blue for active state */
+  color: #fff;
+}

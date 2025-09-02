@@ -625,6 +625,7 @@ class TemperatureMonitor:
         self.telegram_service = TelegramService(self.config, self.db_manager)
         self.mqtt_service = MQTTService(self.config, self._on_mqtt_message)
         self.tasks = []
+        self.notification_queue = Queue()  
     
     # --- DIPERBAIKI: _on_mqtt_message HANYA MENGUPDATE MEMORI ---
     def _on_mqtt_message(self, raw_temperature, topic):
@@ -748,7 +749,7 @@ class TemperatureMonitor:
                     "current_time": self.config.format_indonesia_time(),
                     "timezone": str(self.config.INDONESIA_TZ)
                 }
-            return render_template("index.html", **context)
+            return render_template("index.html", **context, active_page='dryer')
 
         # Dwidaya
         @app.route("/dwidaya")
@@ -933,6 +934,42 @@ class TemperatureMonitor:
                 logger.error(f"Error getting chart data: {e}")
                 return jsonify({"error": str(e)}), 500
         
+        @app.route('/stream-notifications')
+        @login_required
+        def stream_notifications():
+            def generate():
+                logger.info("[SSE Stream] Klien baru terhubung ke stream notifikasi.")
+                try:
+                    while True:
+                        try:
+                            notification = self.notification_queue.get(timeout=25)
+                            # ---> INI TITIK PENTING KEDUA <---
+                            logger.info(f"[SSE Stream] MENGIRIM NOTIFIKASI KE KLIEN: {notification}")
+                            yield f"data: {json.dumps(notification)}\n\n"
+                        except Empty:
+                            yield ": heartbeat\n\n"
+                except GeneratorExit:
+                    logger.info("[SSE Stream] Klien terputus dari stream notifikasi.")
+            
+            return Response(generate(), mimetype='text/event-stream')
+            def generate():
+                logger.info("Client connected to notification stream.")
+                try:
+                    while True:
+                        try:
+                            # Ambil notifikasi dari antrean dengan timeout
+                            notification = self.notification_queue.get(timeout=25)
+                            # Format sebagai Server-Sent Event (SSE)
+                            yield f"data: {json.dumps(notification)}\n\n"
+                        except Empty:
+                            # Kirim heartbeat (komentar) untuk menjaga koneksi tetap terbuka
+                            yield ": heartbeat\n\n"
+                except GeneratorExit:
+                    logger.info("Client disconnected from notification stream.")
+            
+            # Buat Response dengan mimetype khusus untuk SSE
+            return Response(generate(), mimetype='text/event-stream')
+        
         @app.route("/data")
         def get_data_api():
             selected_date = request.args.get('date')
@@ -967,6 +1004,21 @@ class TemperatureMonitor:
             message = f"🧪 **Test Message**\n🕐 {self.config.format_indonesia_time()}"
             self.telegram_service.send_message(message)
             return {"status": "success", "message": "Test message queued"}
+        
+        # ==== Kedi ====
+        @app.route('/kedi')
+        @login_required
+        @check_session_timeout
+        def kedi():
+            return render_template('navigation/kedi.html', active_page='kedi')
+        
+        
+        # ==== Boiler ====
+        @app.route('/boiler')
+        @login_required
+        @check_session_timeout
+        def boiler():
+            return render_template('navigation/boiler.html', active_page='boiler')
         
         return app
     

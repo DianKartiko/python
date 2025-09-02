@@ -67,24 +67,29 @@
           <!-- ======================================================= -->
           <ul class="nav nav-pills justify-content-center mb-4">
             <li class="nav-item">
-              <!-- Tambahkan class 'active' pada link halaman yang sedang dibuka -->
+              <!-- Kondisi ini akan SALAH, jadi link Dryer tidak aktif -->
               <a
-                class="nav-link {%if active_page == 'dryer'%} active {%endif%}"
-                aria-current="page"
+                class="nav-link {% if active_page == 'dryer' %}active{% endif %}"
                 href="/"
               >
                 <i class="bi bi-wind me-1"></i> Dryer
               </a>
             </li>
-            <li class="nav-item {%if active_page == 'kedi'%} active {%endif%}">
-              <a class="nav-link" href="/kedi">
+            <li class="nav-item">
+              <!-- Kondisi ini akan BENAR, jadi link Kedi menjadi aktif -->
+              <a
+                class="nav-link {% if active_page == 'kedi' %}active{% endif %}"
+                href="/kedi"
+              >
                 <i class="bi bi-box-seam me-1"></i> Kedi
               </a>
             </li>
-            <li
-              class="nav-item {%if active_page == 'boiler'%} active {%endif%}"
-            >
-              <a class="nav-link" href="/boiler">
+            <li class="nav-item">
+              <!-- Kondisi ini akan SALAH, jadi link Boiler tidak aktif -->
+              <a
+                class="nav-link {% if active_page == 'boiler' %}active{% endif %}"
+                href="/boiler"
+              >
                 <i class="bi bi-steam me-1"></i> Boiler
               </a>
             </li>
@@ -104,9 +109,7 @@
                     Suhu Dryer 1
                   </h6>
                   <!-- MENGGUNAKAN VARIABEL BARU -->
-                  <p class="temp-reading text-primary" id="current_suhu_1">
-                    {{ current_suhu_1 }}
-                  </p>
+                  <p class="temp-reading text-primary">0</p>
                 </div>
               </div>
             </div>
@@ -122,9 +125,7 @@
                     Suhu Dryer 2
                   </h6>
                   <!-- MENGGUNAKAN VARIABEL BARU -->
-                  <p class="temp-reading text-warning" id="current_suhu_2">
-                    {{ current_suhu_2 }}
-                  </p>
+                  <p class="temp-reading text-warning">0</p>
                 </div>
               </div>
             </div>
@@ -140,9 +141,7 @@
                     Suhu Dryer 3
                   </h6>
                   <!-- MENGGUNAKAN VARIABEL BARU -->
-                  <p class="temp-reading text-danger" id="current_suhu_3">
-                    {{ current_suhu_3 }}
-                  </p>
+                  <p class="temp-reading text-danger">0</p>
                 </div>
               </div>
             </div>

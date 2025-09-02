@@ -228,6 +228,121 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
 
+  // --- Notification Sounds
+  const notificationSound = new Audio("static/sounds/mixkit-long-pop-2358.wav");
+
+  function showNotificationToast(title, message, level = "info") {
+    const toastContainer = document.querySelector(".toast-container");
+    if (!toastContainer) {
+      console.error("Toast container tidak ditemukan di dalam DOM.");
+      return;
+    }
+
+    // Siapkan ikon SVG berdasarkan level notifikasi
+    const icons = {
+      success:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-check-circle-fill text-success me-2" viewBox="0 0 16 16"><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/></svg>',
+      warning:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle-fill text-warning me-2" viewBox="0 0 16 16"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>',
+      danger:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-x-octagon-fill text-danger me-2" viewBox="0 0 16 16"><path d="M11.46.146A.5.5 0 0 0 11.107 0H4.893a.5.5 0 0 0-.353.146L.146 4.54A.5.5 0 0 0 0 4.893v6.214a.5.5 0 0 0 .146.353l4.394 4.394a.5.5 0 0 0 .353.146h6.214a.5.5 0 0 0 .353-.146l4.394-4.394a.5.5 0 0 0 .146-.353V4.893a.5.5 0 0 0-.146-.353L11.46.146zm-6.106 4.5L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 1 1 .708-.708z"/></svg>',
+    };
+    const icon = icons[level] || "";
+
+    // 1. Buat elemen HTML untuk Toast secara dinamis
+    const toastElement = document.createElement("div");
+    toastElement.classList.add("toast");
+    toastElement.setAttribute("role", "alert");
+    toastElement.setAttribute("aria-live", "assertive");
+    toastElement.setAttribute("aria-atomic", "true");
+
+    const now = new Date();
+    const timeString = `${now.getHours().toString().padStart(2, "0")}:${now
+      .getMinutes()
+      .toString()
+      .padStart(2, "0")}`;
+
+    toastElement.innerHTML = `
+      <div class="toast-header">
+        ${icon}
+        <strong class="me-auto">${title}</strong>
+        <small class="text-muted">${timeString}</small>
+        <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+      </div>
+      <div class="toast-body">
+        ${message}
+      </div>
+    `;
+
+    // 2. Tambahkan Toast yang baru dibuat ke dalam container
+    toastContainer.appendChild(toastElement);
+
+    // 3. Inisialisasi Toast menggunakan API Bootstrap dan tampilkan
+    const toast = new bootstrap.Toast(toastElement, {
+      delay: 15000, // Toast akan hilang secara otomatis setelah 15 detik
+    });
+    toast.show();
+
+    // 4. Putar suara notifikasi
+    // `.catch()` ditambahkan untuk menangani error jika browser memblokir auto-play audio
+    notificationSound.play().catch((error) => {
+      console.warn("Pemutaran audio dicegah oleh browser:", error);
+    });
+
+    // 5. Hapus elemen Toast dari DOM setelah selesai ditampilkan untuk menjaga kebersihan HTML
+    toastElement.addEventListener("hidden.bs.toast", () => {
+      toastElement.remove();
+    });
+  }
+
+  /**
+   * Fungsi untuk terhubung ke Stream Notifikasi Real-time dari server.
+   * Fungsi ini menggunakan EventSource untuk mendengarkan endpoint /stream-notifications.
+   */
+  function connectToNotificationStream() {
+    console.log("[SSE] Mencoba terhubung ke /stream-notifications...");
+    const eventSource = new EventSource("/stream-notifications");
+
+    // Event handler ketika koneksi berhasil dibuka
+    eventSource.onopen = function () {
+      console.log("[SSE] Koneksi ke stream notifikasi BERHASIL dibuat.");
+    };
+
+    // Event handler ketika ada pesan baru diterima dari server
+    eventSource.onmessage = function (event) {
+      // Abaikan pesan heartbeat yang digunakan untuk menjaga koneksi tetap hidup
+      if (event.data.includes("heartbeat")) {
+        console.log("[SSE] Heartbeat diterima dari server.");
+        return;
+      }
+
+      console.log("[SSE] Data mentah diterima:", event.data);
+
+      try {
+        const data = JSON.parse(event.data);
+        console.log("[SSE] Data berhasil di-parse:", data);
+        // Panggil fungsi helper untuk menampilkan notifikasi ke UI
+        showNotificationToast(data.title, data.message, data.level);
+      } catch (e) {
+        console.error("[SSE] Gagal mem-parsing data JSON dari server:", e);
+      }
+    };
+
+    // Event handler ketika terjadi error pada koneksi
+    eventSource.onerror = function (err) {
+      console.error("[SSE] Terjadi error pada koneksi EventSource:", err);
+      eventSource.close();
+      console.log(
+        "[SSE] Koneksi ditutup karena error, mencoba lagi dalam 5 detik..."
+      );
+      // Coba sambungkan kembali setelah 5 detik
+      setTimeout(connectToNotificationStream, 5000);
+    };
+  }
+
+  // --- Fungsi untuk Stream Notification
+  connectToNotificationStream();
+
   connectToDataStream(); // Fungsi yang baru saja kita buat
   // Muat data awal untuk hari ini
   setTimeout(() => {
