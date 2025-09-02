@@ -149,7 +149,7 @@ class TemperatureMonitor:
     
     def create_flask_app(self):
         """Create dan configure Flask application"""
-        app = Flask(__name__, template_folder='templates', static_folder='static')
+        app = Flask(__name__, template_folder='../templates', static_folder='../static')
         app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'default-secret-key-for-dev')
         
         # Session configuration
