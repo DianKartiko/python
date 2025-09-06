@@ -13,6 +13,7 @@ from services.telegram_service import TelegramService
 from tasks.data_save_task import DataSaveTask
 from tasks.excel_report_task import DailyExcelReportTask
 from web.routes import WebRoutes
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,11 @@ class TemperatureMonitor:
             "kedi": {"kedi1": None, "kedi2": None},
             "boiler": {"boiler1": None, "boiler2": None}
         }
+        
+        # Additional data for kedi and boiler systems
+        self.latest_humidity = {"humidity4": None}
+        self.latest_pressure = {"kedi1": None, "kedi2": None}
+        self.latest_water_level = {"boiler1": None, "boiler2": None}
         
         self.data_lock = threading.Lock()
         
@@ -45,23 +51,47 @@ class TemperatureMonitor:
         self.tasks = []
         self.notification_queue = Queue()
     
-    def _on_mqtt_message(self, raw_temperature, topic):
-        """Callback untuk setiap pesan MQTT. Memproses suhu dan mengirim notifikasi."""
+    def _on_mqtt_message(self, parsed_data, topic):
+        """Callback untuk setiap pesan MQTT. Memproses data dan mengirim notifikasi."""
         device_info = self._get_device_info_from_topic(topic)
         if not device_info:
             return
         
         system_type, device_id = device_info
-        adjusted_temperature = self.config.apply_temperature_offset(raw_temperature)
         
-        # Update memory
+        # Update memory based on data type
         with self.data_lock:
-            self.latest_temperatures[system_type][device_id] = adjusted_temperature
+            if isinstance(parsed_data, dict):
+                # Handle JSON data with multiple fields
+                if 'temperature' in parsed_data:
+                    self.latest_temperatures[system_type][device_id] = parsed_data['temperature']
+                
+                if 'humidity' in parsed_data and device_id == 'humidity4':
+                    self.latest_humidity[device_id] = parsed_data['humidity']
+                
+                if 'pressure' in parsed_data and system_type == 'kedi':
+                    self.latest_pressure[device_id] = parsed_data['pressure']
+                
+                if 'water_level' in parsed_data and system_type == 'boiler':
+                    self.latest_water_level[device_id] = parsed_data['water_level']
+            
+            elif isinstance(parsed_data, (int, float)):
+                # Handle simple numeric data (temperature only)
+                self.latest_temperatures[system_type][device_id] = self.config.apply_temperature_offset(parsed_data)
         
-        logger.info(f"Data {{{device_id}}} diterima: {adjusted_temperature:.2f}°C")
+        # Log the received data
+        if isinstance(parsed_data, dict):
+            logger.info(f"Data {{{device_id}}} diterima: {parsed_data}")
+        else:
+            adjusted_temp = self.config.apply_temperature_offset(parsed_data)
+            logger.info(f"Data {{{device_id}}} diterima: {adjusted_temp:.2f}°C")
         
-        # Check alerts and send notifications
-        self._check_temperature_alerts(device_id, adjusted_temperature)
+        # Check alerts and send notifications (for temperature only)
+        if isinstance(parsed_data, dict) and 'temperature' in parsed_data:
+            self._check_temperature_alerts(device_id, parsed_data['temperature'])
+        elif isinstance(parsed_data, (int, float)):
+            adjusted_temp = self.config.apply_temperature_offset(parsed_data)
+            self._check_temperature_alerts(device_id, adjusted_temp)
     
     def _get_device_info_from_topic(self, topic):
         """Extract device info from MQTT topic"""
@@ -76,12 +106,17 @@ class TemperatureMonitor:
             # Boiler topics
             self.config.MQTT_TOPICS.get("boiler1"): ("boiler", "boiler1"),
             self.config.MQTT_TOPICS.get("boiler2"): ("boiler", "boiler2"),
+            # Humidity topic
+            self.config.MQTT_TOPICS.get("humidity4"): ("kedi", "humidity4"),
         }
         
         return topic_mapping.get(topic)
     
     def _check_temperature_alerts(self, device_id, temperature):
         """Check temperature alerts dan kirim notifikasi jika diperlukan"""
+        if temperature is None:
+            return
+            
         waktu_kejadian = self.config.format_indonesia_time()
         telegram_message = None
         notification_payload = None
@@ -123,7 +158,14 @@ class TemperatureMonitor:
     def get_latest_temperatures(self):
         """Mendapatkan semua suhu terbaru dari memori"""
         with self.data_lock:
-            return self.latest_temperatures.copy()
+            return {
+                'dryer': self.latest_temperatures['dryer'].copy(),
+                'kedi': self.latest_temperatures['kedi'].copy(),
+                'boiler': self.latest_temperatures['boiler'].copy(),
+                'humidity': self.latest_humidity.copy(),
+                'pressure': self.latest_pressure.copy(),
+                'water_level': self.latest_water_level.copy()
+            }
     
     def start_background_tasks(self):
         """Memulai semua background tasks"""
@@ -131,10 +173,21 @@ class TemperatureMonitor:
         from tasks.keepalive_task import KeepaliveTask
         from tasks.monitor_data_task import MonitorDataTask
         
-        self.tasks.append(DataSaveTask(self.config, self, self.db_manager))
-        self.tasks.append(DailyExcelReportTask(self.config, self.db_manager, self.telegram_service))
+        # Data save tasks for each system
+        self.tasks.append(DataSaveTask(self.config, self, self.db_manager, 'dryer'))
+        self.tasks.append(DataSaveTask(self.config, self, self.db_manager, 'kedi'))
+        self.tasks.append(DataSaveTask(self.config, self, self.db_manager, 'boiler'))
+        
+        # Report tasks for each system
+        self.tasks.append(DailyExcelReportTask(self.config, self.db_manager, self.telegram_service, 'dryer'))
+        self.tasks.append(DailyExcelReportTask(self.config, self.db_manager, self.telegram_service, 'kedi'))
+        self.tasks.append(DailyExcelReportTask(self.config, self.db_manager, self.telegram_service, 'boiler'))
+        
+        # Other tasks
         self.tasks.append(KeepaliveTask(self.config))
-        self.tasks.append(MonitorDataTask(self.config, self.db_manager, self.telegram_service))
+        self.tasks.append(MonitorDataTask(self.config, self.db_manager, self.telegram_service, 'dryer'))
+        self.tasks.append(MonitorDataTask(self.config, self.db_manager, self.telegram_service, 'kedi'))
+        self.tasks.append(MonitorDataTask(self.config, self.db_manager, self.telegram_service, 'boiler'))
         
         for task in self.tasks:
             task.start()
@@ -210,6 +263,10 @@ class TemperatureMonitor:
             # Start Telegram polling
             self.telegram_service.start_polling()
             
+            # Keep main thread alive
+            while True:
+                time.sleep(1)
+                
         except KeyboardInterrupt:
             logger.info("Shutting down...")
         finally:

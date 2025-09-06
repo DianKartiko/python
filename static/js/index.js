@@ -120,6 +120,8 @@ document.addEventListener("DOMContentLoaded", function () {
     const suhu2Element = document.getElementById("current_suhu_2");
     const suhu3Element = document.getElementById("current_suhu_3");
 
+    const kelembapanElement = document.getElementById("current_humidity_1"); // Ganti nama variabel agar konsisten & perbaiki typo
+
     // Buat koneksi EventSource ke endpoint stream di Flask
     const eventSource = new EventSource("/stream-data");
 
@@ -141,6 +143,11 @@ document.addEventListener("DOMContentLoaded", function () {
       if (suhu3Element) {
         suhu3Element.textContent =
           data.dryer3 !== "N/A" ? `${data.dryer3}°C` : "N/A";
+      }
+      if (kelembapanElement) {
+        // Perbarui nama variabel
+        kelembapanElement.textContent =
+          data.kelembapan !== "N/A" ? `${data.kelembapan.toFixed(1)}%` : "N/A"; // Ganti unit ke % dan format
       }
     };
 

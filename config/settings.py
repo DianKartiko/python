@@ -29,6 +29,9 @@ class TemperatureMonitorConfig:
             # Sistem untuk boiler baru
             "boiler1": os.getenv("MQTT_TOPIC_BOILER_1"),
             "boiler2": os.getenv("MQTT_TOPIC_BOILER_2"),
+            
+            # Sistem untuk Kelembaban Kedi
+            "humidity4" : os.getenv("MQTT_HUMIDITY_4")
         }
         
         # Telegram Configuration

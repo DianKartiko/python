@@ -9,6 +9,7 @@ class DwidayaController {
       "kedi2",
       "boiler1",
       "boiler2",
+      "kelembaban4",
     ];
   }
 
