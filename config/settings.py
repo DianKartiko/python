@@ -29,6 +29,9 @@ class TemperatureMonitorConfig:
             # Sistem untuk boiler baru
             "boiler1": os.getenv("MQTT_TOPIC_BOILER_1"),
             "boiler2": os.getenv("MQTT_TOPIC_BOILER_2"),
+
+            # Sistem untuk humidity kedi 
+            "kedi4_humidity": os.getenv("MQTT_TOPIC_KEDI_4_HUMIDITY"),
         }
         
         # Telegram Configuration
@@ -41,6 +44,11 @@ class TemperatureMonitorConfig:
         self.INDONESIA_TZ = ZoneInfo("Asia/Jakarta")
         self.MIN_TEMP_ALERT = float(120)
         self.MAX_TEMP_ALERT = float(155)
+
+        # Kedi Configuration
+        self.HUMIDITY_OFFSET = 0.0
+        self.MIN_HUMIDITY_ALERT = 30.0  # % RH
+        self.MAX_HUMIDITY_ALERT = 80.0  # % RH
         
         # Database Configuration
         self.DB_PATH = "/data/data_suhu_multi.db" if os.path.exists("/data") else "data_suhu_multi.db"
@@ -76,3 +84,9 @@ class TemperatureMonitorConfig:
         if raw_temp is None:
             return None
         return raw_temp + self.TEMPERATURE_OFFSET
+    
+    def apply_humidity_offset(self, raw_humidity):
+        """Apply consistent humidity offset"""
+        if raw_humidity is None:
+            return None
+        return raw_humidity + self.HUMIDITY_OFFSET
