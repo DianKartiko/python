@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Flask Requirements
 from flask import Flask, request, render_template, jsonify, Response, redirect, url_for, flash, session
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -12,14 +13,10 @@ import sqlite3
 import datetime
 import time
 from datetime import timedelta
-from zoneinfo import ZoneInfo  # Untuk timezone Indonesia
+from zoneinfo import ZoneInfo
 # MQTT Service 
 import paho.mqtt.client as mqtt
-# Telegram Requirements
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, Bot
-from telegram.ext import ContextTypes, ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters
-import asyncio
-# Operatin System Requirements
+# Operating System Requirements
 from dotenv import load_dotenv
 import os
 # Logging System
@@ -27,17 +24,30 @@ import logging
 # Excel Requirements
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
-# Untuk Input dan Output
+# Input dan Output
 from queue import Queue, Empty
 from io import BytesIO
 from functools import wraps
 import json
+import sys
 
-# Setup logging dengan timezone Indonesia
+# Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+# Load environment variables
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+dotenv_path = os.path.join(base_dir, "monitoring_website", ".env")
+if os.path.exists(dotenv_path):
+    load_dotenv(dotenv_path)
+else:
+    load_dotenv()  # Load from current directory
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+# Configuration for subdirectory deployment
+SUBDIRECTORY = os.getenv('SUBDIRECTORY', '/monitoring_website')
+logger.info(f"Application configured for subdirectory: {SUBDIRECTORY}")
 
 # --- LOGIN SYSTEM: User Class ---
 class User(UserMixin):
@@ -52,32 +62,27 @@ def is_safe_url(target):
     test_url = urlparse(urljoin(request.host_url, target))
     return test_url.scheme in ('http', 'https') and ref_url.netloc == test_url.netloc
 
-# 2. SESSION TIMEOUT DECORATOR (tambah sebelum class TemperatureMonitor)
+# SESSION TIMEOUT DECORATOR
 def check_session_timeout(f):
     """Decorator untuk mengecek apakah session sudah timeout"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if current_user.is_authenticated:
-            # Cek apakah ada timestamp login di session
             if 'login_timestamp' in session:
                 login_time = session['login_timestamp']
                 current_time = time.time()
                 
-                # Hitung durasi login (24 jam = 86400 detik)
                 session_duration = current_time - login_time
-                max_session_duration = 24 * 60 * 60  # 24 jam dalam detik
+                max_session_duration = 24 * 60 * 60
                 
                 if session_duration > max_session_duration:
-                    # Session expired, logout otomatis
                     logout_user()
-                    session.clear()  # Bersihkan semua session data
+                    session.clear()
                     flash('Your session has expired after 24 hours. Please log in again.', 'warning')
                     return redirect(url_for('login'))
                 else:
-                    # Session masih valid, update last activity
                     session['last_activity'] = current_time
             else:
-                # Tidak ada timestamp login, anggap session tidak valid
                 logout_user()
                 session.clear()
                 flash('Invalid session. Please log in again.', 'warning')
@@ -86,7 +91,6 @@ def check_session_timeout(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# 3. SESSION INFO HELPER (tambah sebelum class TemperatureMonitor)
 def get_session_info():
     """Helper untuk mendapatkan informasi session"""
     if not current_user.is_authenticated or 'login_timestamp' not in session:
@@ -95,51 +99,48 @@ def get_session_info():
     login_time = session['login_timestamp']
     current_time = time.time()
     session_age = current_time - login_time
-    remaining_time = (24 * 60 * 60) - session_age  # sisa waktu dalam detik
+    remaining_time = (24 * 60 * 60) - session_age
     
     return {
         'login_time': datetime.datetime.fromtimestamp(login_time).strftime('%Y-%m-%d %H:%M:%S'),
         'session_age_hours': session_age / 3600,
         'remaining_hours': max(0, remaining_time / 3600),
         'remaining_minutes': max(0, (remaining_time % 3600) / 60),
-        'is_expiring_soon': remaining_time < (2 * 3600),  # kurang dari 2 jam
+        'is_expiring_soon': remaining_time < (2 * 3600),
         'expires_at': datetime.datetime.fromtimestamp(login_time + (24 * 60 * 60)).strftime('%Y-%m-%d %H:%M:%S')
     }
-# ------------------------------
 
 # Basic Configuration
 class TemperatureMonitorConfig:
     """Class untuk mengelola konfigurasi aplikasi"""
     
     def __init__(self):
-        self.MQTT_BROKER = os.getenv("MQTT_BROKER")
+        self.MQTT_BROKER = os.getenv("MQTT_BROKER", "broker.hivemq.com")
         self.MQTT_PORT = 1883
         self.MQTT_TOPICS = {
-            "dryer1": os.getenv("MQTT_TOPIC_1"),
-            "dryer2": os.getenv("MQTT_TOPIC_2"),
-            "dryer3": os.getenv("MQTT_TOPIC_3"),
-            # === TAMBAHAN HUMIDITY TOPIC ===
-            "humidity1": os.getenv("MQTT_TOPIC_KEDI_1_HUMIDITY"),
+            "dryer1": os.getenv("MQTT_TOPIC_1", "esp32/suhu1"),
+            "dryer2": os.getenv("MQTT_TOPIC_2", "esp32/suhu"),
+            "dryer3": os.getenv("MQTT_TOPIC_3", "esp32/suhu3"),
+            "humidity1": os.getenv("MQTT_TOPIC_KEDI_1_HUMIDITY", "kedi/kedi1/humidity"),
         }
-        self.TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-        self.CHAT_ID = os.getenv("CHAT_ID")
-        self.DATA_SAVE_INTERVAL = 600 # Pengambilan data di lakukan setiap 10 menit sekali
+        self.DATA_SAVE_INTERVAL = 600
         self.TEMPERATURE_OFFSET = 12.6
-        # === TAMBAHAN HUMIDITY KONFIGURASI ===
-        self.MIN_HUMIDITY_ALERT = float(30)  # Alert jika kelembaban < 30%
-        self.MAX_HUMIDITY_ALERT = float(90)  # Alert jika kelembaban > 90%
-        # ===================================
+        self.MIN_HUMIDITY_ALERT = float(30)
+        self.MAX_HUMIDITY_ALERT = float(90)
         self.INDONESIA_TZ = ZoneInfo("Asia/Jakarta")
         self.MIN_TEMP_ALERT = float(120)
         self.MAX_TEMP_ALERT = float(155)
         self.DB_PATH = "/data/data_suhu_multi.db" if os.path.exists("/data") else "data_suhu_multi.db"
         
+        # Disable background tasks untuk shared hosting
+        self.ENABLE_BACKGROUND_TASKS = os.getenv('ENABLE_BACKGROUND_TASKS', 'false').lower() == 'true'
+        
         self.validate()
         
     def validate(self):
         """Validasi konfigurasi yang diperlukan"""
-        if not all([self.MQTT_BROKER, self.TELEGRAM_TOKEN, self.CHAT_ID]):
-            logger.error("Missing required environment variables")
+        if not self.MQTT_BROKER:
+            logger.error("Missing MQTT_BROKER environment variable")
             exit(1)
             
         logger.info(f"Config loaded - Broker: {self.MQTT_BROKER}")
@@ -167,14 +168,15 @@ class TemperatureMonitorConfig:
         return raw_temp + self.TEMPERATURE_OFFSET
 
 class DatabaseManager:
-    """Class untuk mengelola operasi database untuk multi-dryer dan humidity"""
+    """Class untuk mengelola operasi database"""
     
     def __init__(self, db_path):
         self.db_path = db_path
+        self.connection_lock = threading.Lock()
         self.initialize_database()
         
     def initialize_database(self):
-        """Initialize database dengan table yang bisa menyimpan ID dryer dan humidity"""
+        """Initialize database dengan table yang diperlukan"""
         with self.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
@@ -186,7 +188,6 @@ class DatabaseManager:
                 )
             """)
             
-            # === TAMBAHAN TABLE HUMIDITY ===
             c.execute("""
                 CREATE TABLE IF NOT EXISTS humidity (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,33 +196,43 @@ class DatabaseManager:
                     humidity REAL
                 )
             """)
-            # ===============================
             
-            # --- LOGIN SYSTEM: Create users table ---
             c.execute("""
                 CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                    username TEXT UNIQUE NOT NULL, 
+                    password TEXT NOT NULL
                 )
             """)
-            # ----------------------------------------
             
-        logger.info(f"Database multi-dryer with humidity support initialized at: {self.db_path}")
+            # Create indexes for better performance
+            c.execute("CREATE INDEX IF NOT EXISTS idx_suhu_waktu ON suhu(waktu)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_humidity_waktu ON humidity(waktu)")
+            
+        logger.info(f"Database initialized at: {self.db_path}")
     
     def get_connection(self):
-        """Mendapatkan koneksi database yang thread-safe"""
-        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
+        """Thread-safe database connection with optimizations"""
+        conn = sqlite3.connect(
+            self.db_path, 
+            check_same_thread=False, 
+            timeout=10.0,
+            isolation_level=None  # Autocommit mode
+        )
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=10000")
         return conn
     
-    # --- LOGIN SYSTEM: Methods for user management ---
     def get_user_by_username(self, username):
         try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT * FROM users WHERE username = ?", (username,))
-                user_data = c.fetchone()
-                if user_data:
-                    return User(id=user_data[0], username=user_data[1], password=user_data[2])
+            with self.connection_lock:
+                with self.get_connection() as conn:
+                    c = conn.cursor()
+                    c.execute("SELECT * FROM users WHERE username = ?", (username,))
+                    user_data = c.fetchone()
+                    if user_data:
+                        return User(id=user_data[0], username=user_data[1], password=user_data[2])
             return None
         except Exception as e:
             logger.error(f"Error getting user by username: {e}")
@@ -229,57 +240,58 @@ class DatabaseManager:
 
     def get_user_by_id(self, user_id):
         try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-                user_data = c.fetchone()
-                if user_data:
-                    return User(id=user_data[0], username=user_data[1], password=user_data[2])
+            with self.connection_lock:
+                with self.get_connection() as conn:
+                    c = conn.cursor()
+                    c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+                    user_data = c.fetchone()
+                    if user_data:
+                        return User(id=user_data[0], username=user_data[1], password=user_data[2])
             return None
         except Exception as e:
             logger.error(f"Error getting user by ID: {e}")
             return None
     
     def create_initial_user(self, username, password):
-        """Membuat user awal jika belum ada, menggunakan Fly secrets."""
+        """Create initial user if not exists"""
         if not self.get_user_by_username(username):
-            logger.info(f"User '{username}' tidak ditemukan, mencoba membuat user baru...")
+            logger.info(f"Creating initial user: {username}")
             try:
-                with self.get_connection() as conn:
-                    c = conn.cursor()
-                    hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
-                    c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_password))
-                    conn.commit()
-                    logger.info(f"User '{username}' berhasil dibuat dari environment secrets.")
+                with self.connection_lock:
+                    with self.get_connection() as conn:
+                        c = conn.cursor()
+                        hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
+                        c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_password))
+                        logger.info(f"User '{username}' created successfully")
             except Exception as e:
-                logger.error(f"Gagal membuat initial user: {e}")
-    # -----------------------------------------------
+                logger.error(f"Failed to create initial user: {e}")
     
     def insert_temperature(self, waktu, dryer_id, suhu):
-        """Insert data suhu ke database dengan menyertakan ID dryer"""
+        """Insert temperature data"""
         try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("INSERT INTO suhu (waktu, dryer_id, suhu) VALUES (?, ?, ?)", (waktu, dryer_id, suhu))
+            with self.connection_lock:
+                with self.get_connection() as conn:
+                    c = conn.cursor()
+                    c.execute("INSERT INTO suhu (waktu, dryer_id, suhu) VALUES (?, ?, ?)", (waktu, dryer_id, suhu))
             return True
         except Exception as e:
             logger.error(f"Error inserting temperature: {e}")
             return False
     
-    # === TAMBAHAN METHOD HUMIDITY ===
     def insert_humidity(self, waktu, sensor_id, humidity):
-        """Insert data humidity ke database dengan menyertakan sensor ID"""
+        """Insert humidity data"""
         try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("INSERT INTO humidity (waktu, sensor_id, humidity) VALUES (?, ?, ?)", (waktu, sensor_id, humidity))
+            with self.connection_lock:
+                with self.get_connection() as conn:
+                    c = conn.cursor()
+                    c.execute("INSERT INTO humidity (waktu, sensor_id, humidity) VALUES (?, ?, ?)", (waktu, sensor_id, humidity))
             return True
         except Exception as e:
             logger.error(f"Error inserting humidity: {e}")
             return False
     
     def get_humidity_by_date(self, date_str, sensor_id="humidity1", latest_only=False):
-        """Mendapatkan data humidity untuk tanggal tertentu"""
+        """Get humidity data for specific date"""
         try:
             start_time = f"{date_str} 00:00:00"
             end_time = f"{date_str} 23:59:59"
@@ -295,31 +307,17 @@ class DatabaseManager:
             else:
                 sql += " ORDER BY waktu ASC"
 
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute(sql, (start_time, end_time, sensor_id))
-                return c.fetchall()
+            with self.connection_lock:
+                with self.get_connection() as conn:
+                    c = conn.cursor()
+                    c.execute(sql, (start_time, end_time, sensor_id))
+                    return c.fetchall()
         except Exception as e:
             logger.error(f"Error getting humidity data for date {date_str}: {e}")
             return []
     
-    def get_recent_humidity_data(self, sensor_id="humidity1", limit=5):
-        """Mendapatkan data humidity terbaru"""
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT waktu, sensor_id, humidity FROM humidity WHERE sensor_id = ? ORDER BY id DESC LIMIT ?", (sensor_id, limit))
-                return c.fetchall()
-        except Exception as e:
-            logger.error(f"Error getting recent humidity data: {e}")
-            return []
-    # ==============================
-    
     def get_data_by_date_pivoted(self, date_str, latest_only=False):
-        """
-        Mendapatkan data untuk tanggal tertentu.
-        Jika latest_only=True, hanya mengembalikan 1 baris data terbaru.
-        """
+        """Get pivoted temperature data for specific date"""
         try:
             start_time = f"{date_str} 00:00:00"
             end_time = f"{date_str} 23:59:59"
@@ -340,575 +338,270 @@ class DatabaseManager:
             else:
                 sql += " ORDER BY timestamp ASC"
 
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute(sql, (start_time, end_time))
-                return c.fetchall()
+            with self.connection_lock:
+                with self.get_connection() as conn:
+                    c = conn.cursor()
+                    c.execute(sql, (start_time, end_time))
+                    return c.fetchall()
         except Exception as e:
             logger.error(f"Error getting pivoted data for date {date_str}: {e}")
             return []
-            
-    def get_data_since(self, since_time):
-        """Mendapatkan data sejak waktu tertentu"""
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT * FROM suhu WHERE datetime(waktu) >= datetime(?) ORDER BY waktu", (since_time,))
-                return c.fetchall()
-        except Exception as e:
-            logger.error(f"Error getting data since {since_time}: {e}")
-            return []
-    
-    def get_recent_data(self, limit=5):
-        """Mendapatkan data terbaru (untuk handler Telegram)"""
-        try:
-            with self.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT waktu, dryer_id, suhu FROM suhu ORDER BY id DESC LIMIT ?", (limit,))
-                return c.fetchall()
-        except Exception as e:
-            logger.error(f"Error getting recent data: {e}")
-            return []
 
 class MQTTService:
-    """Class untuk mengelola koneksi dan komunikasi MQTT untuk temperature dan humidity"""
+    """Optimized MQTT Service"""
     
     def __init__(self, config, data_callback):
         self.config = config
         self.data_callback = data_callback
         self.client = mqtt.Client()
         self.is_connected = False
+        self.connection_lock = threading.Lock()
         self.setup_callbacks()
         
     def setup_callbacks(self):
-        """Setup callback functions untuk MQTT client"""
+        """Setup MQTT callbacks"""
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
         self.client.on_disconnect = self._on_disconnect
+        
+        # MQTT optimizations
+        self.client.keepalive = 60
+        self.client.max_inflight_messages_set(20)
+        self.client.max_queued_messages_set(0)
     
     def _on_connect(self, client, userdata, flags, rc):
-        """Callback ketika terhubung ke MQTT broker"""
-        if rc == 0:
-            self.is_connected = True
-            logger.info(f"MQTT Connected successfully at {self.config.format_indonesia_time()}")
-            for topic in self.config.MQTT_TOPICS.values():
-                if topic: 
-                    self.client.subscribe(topic)
-                    logger.info(f"Subscribed to topic: {topic}")
-            logger.info(f"All subscriptions completed: {self.config.MQTT_TOPICS}")
-        else:
-            logger.error(f"MQTT Connection failed with code {rc}")
+        """MQTT connect callback"""
+        with self.connection_lock:
+            if rc == 0:
+                self.is_connected = True
+                logger.info(f"MQTT Connected at {self.config.format_indonesia_time()}")
+                for topic in self.config.MQTT_TOPICS.values():
+                    if topic: 
+                        self.client.subscribe(topic)
+                        logger.info(f"Subscribed to: {topic}")
+            else:
+                logger.error(f"MQTT Connection failed with code {rc}")
     
     def _on_message(self, client, userdata, msg):
-        """Callback ketika menerima message MQTT"""
+        """MQTT message callback - non-blocking"""
         try:
             raw_value = float(msg.payload.decode())
             if self.data_callback:
-                self.data_callback(raw_value, msg.topic)
+                threading.Thread(
+                    target=self.data_callback, 
+                    args=(raw_value, msg.topic), 
+                    daemon=True
+                ).start()
         except Exception as e:
-            logger.error(f"Error parsing MQTT data from topic {msg.topic}: {e}")
+            logger.error(f"Error parsing MQTT data from {msg.topic}: {e}")
     
     def _on_disconnect(self, client, userdata, rc):
-        """Callback ketika terputus dari MQTT broker"""
-        self.is_connected = False
-        logger.warning(f"MQTT Disconnected with code {rc} at {self.config.format_indonesia_time()}")
+        """MQTT disconnect callback"""
+        with self.connection_lock:
+            self.is_connected = False
+            logger.warning(f"MQTT Disconnected with code {rc}")
     
     def connect(self):
-        """Connect ke MQTT broker"""
-        try:
-            self.client.connect(self.config.MQTT_BROKER, self.config.MQTT_PORT, 60)
-            self.client.loop_start()
-            logger.info("MQTT Client started")
-            return True
-        except Exception as e:
-            logger.error(f"MQTT Connection failed: {e}")
-            return False
+        """Connect to MQTT broker with retry logic"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self.client.connect(self.config.MQTT_BROKER, self.config.MQTT_PORT, 60)
+                self.client.loop_start()
+                logger.info("MQTT Client started")
+                return True
+            except Exception as e:
+                logger.error(f"MQTT Connection attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                continue
+        return False
     
     def disconnect(self):
-        """Disconnect dari MQTT broker"""
-        self.client.loop_stop()
-        self.client.disconnect()
+        """Disconnect from MQTT broker"""
+        with self.connection_lock:
+            self.client.loop_stop()
+            self.client.disconnect()
 
-class TelegramService:
-    """Class untuk mengelola komunikasi Telegram dengan antrean dan worker."""
-    def __init__(self, config, db_manager):
-        self.config = config
-        self.db_manager = db_manager
-        self.bot = Bot(token=config.TELEGRAM_TOKEN)
-        self.application = ApplicationBuilder().token(self.config.TELEGRAM_TOKEN).build()
-        self._setup_handlers()
-        self.message_queue = Queue()
-        self.worker_thread = None
-        self.is_worker_running = False
-
-    def _setup_handlers(self):
-        self.application.add_handler(MessageHandler(filters.Regex('^Mulai$'), self.start))
-        self.application.add_handler(CallbackQueryHandler(self.button))
-
-    async def _send_message_async(self, message):
-        try:
-            await self.bot.send_message(chat_id=self.config.CHAT_ID, text=message, parse_mode="Markdown")
-            logger.info("Pesan Telegram berhasil dikirim dari worker.")
-        except Exception as e:
-            logger.error(f"Gagal mengirim pesan dari worker: {e}")
-
-    async def _send_document_async(self, file_path, caption):
-        try:
-            with open(file_path, "rb") as file:
-                await self.bot.send_document(chat_id=self.config.CHAT_ID, document=file, caption=caption, parse_mode="Markdown")
-            logger.info(f"Dokumen {file_path} berhasil dikirim dari worker.")
-        except Exception as e:
-            logger.error(f"Gagal mengirim dokumen dari worker: {e}")
-
-    def _process_queue(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        while self.is_worker_running:
-            try:
-                task_type, *args = self.message_queue.get(timeout=1) 
-                if task_type == 'message':
-                    loop.run_until_complete(self._send_message_async(args[0]))
-                elif task_type == 'document':
-                    loop.run_until_complete(self._send_document_async(args[0], args[1]))
-                self.message_queue.task_done()
-            except Empty:
-                continue
-            except Exception as e:
-                logger.error(f"Error di dalam Telegram worker thread: {e}")
-
-    def start_worker(self):
-        if not self.is_worker_running:
-            self.is_worker_running = True
-            self.worker_thread = threading.Thread(target=self._process_queue, daemon=True, name="TelegramWorker")
-            self.worker_thread.start()
-            logger.info("Telegram worker thread dimulai.")
-
-    def stop_worker(self):
-        self.is_worker_running = False
-        if self.worker_thread:
-            self.worker_thread.join(timeout=5)
-            logger.info("Telegram worker thread dihentikan.")
-
-    def send_message(self, message):
-        self.message_queue.put(('message', message))
-
-    def send_document(self, file_path, caption):
-        self.message_queue.put(('document', file_path, caption))
-    
-    async def start(self, update, context):
-        keyboard = [
-            [InlineKeyboardButton("Test Message", callback_data="test")],
-            [InlineKeyboardButton("Data Dryers", callback_data="data")],
-            [InlineKeyboardButton("Data Humidity", callback_data="humidity")],  # === TAMBAHAN BUTTON ===
-            [InlineKeyboardButton("Force Excel", callback_data="force_excel")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Pilih opsi:", reply_markup=reply_markup)
-    
-    async def button(self, update, context):
-        query = update.callback_query
-        await query.answer()
-        if query.data == "test":
-            await self._handle_test(query)
-        elif query.data == "data":
-            await self._handle_data(query)
-        elif query.data == "humidity":  # === TAMBAHAN HANDLER ===
-            await self._handle_humidity(query)
-        elif query.data == "force_excel":
-            await self._handle_force_excel(query)
-    
-    async def _handle_test(self, query):
-        current_time = self.config.format_indonesia_time()
-        test_message = f"🧪 Test Message\n🕐 Waktu: {current_time}\n✅ Bot berfungsi normal!"
-        await query.edit_message_text(test_message)
-    
-    async def _handle_data(self, query):
-        recent_data = self.db_manager.get_recent_data(5)
-        if recent_data:
-            data_text = "📊 5 Data Terakhir:\n\n"
-            for row in recent_data:
-                data_text += f"*{row[1].upper()}*:\n🕐 {row[0]} WIB\n🌡️ {row[2]:.1f}°C\n\n"
-        else:
-            data_text = "❌ Tidak ada data tersedia"
-        await query.edit_message_text(data_text)
-    
-    # === TAMBAHAN HANDLER HUMIDITY ===
-    async def _handle_humidity(self, query):
-        recent_data = self.db_manager.get_recent_humidity_data("humidity1", 5)
-        if recent_data:
-            data_text = "💧 5 Data Humidity Terakhir:\n\n"
-            for row in recent_data:
-                data_text += f"*{row[1].upper()}*:\n🕐 {row[0]} WIB\n💧 {row[2]:.1f}%\n\n"
-        else:
-            data_text = "❌ Tidak ada data humidity tersedia"
-        await query.edit_message_text(data_text)
-    # ================================
-    
-    async def _handle_force_excel(self, query):
-        await query.edit_message_text("📊 Generating Excel... Please wait...")
-        today_str = self.config.get_indonesia_time().strftime('%Y-%m-%d')
-        rows = self.db_manager.get_data_by_date_pivoted(today_str)
-        if not rows:
-            await query.edit_message_text("❌ No data available for today.")
-            return
-        wb = Workbook()
-        ws = wb.active
-        ws.title = f"Data Suhu {today_str}"
-        ws.append(["Waktu (WIB)", "Dryer 1 (°C)", "Dryer 2 (°C)", "Dryer 3 (°C)"])
-        for row in rows: ws.append(list(row))
-        temp_dir = "/tmp" if os.path.exists("/tmp") else "."
-        filename = os.path.join(temp_dir, f"manual_report_{today_str}.xlsx")
-        wb.save(filename)
-        caption = f"📊 Laporan Manual - {today_str}"
-        with open(filename, "rb") as file:
-            await self.bot.send_document(chat_id=query.message.chat_id, document=file, caption=caption)
-        try: os.remove(filename)
-        except: pass
-        await query.edit_message_text(f"✅ Excel sent! {len(rows)} records")
-    
-    def start_polling(self):
-        if self.application:
-            self.application.run_polling()
-
-class BackgroundTask:
-    def __init__(self, interval, name="BackgroundTask"):
-        self.interval = interval
-        self.name = name
-        self.thread = None
-        self.is_running = False
-    def task(self):
-        raise NotImplementedError
-    def run(self):
-        self.is_running = True
-        while self.is_running:
-            try:
-                if self.is_running: self.task()
-            except Exception as e:
-                logger.error(f"Error in {self.name}: {e}")
-            if self.interval > 0:
-                time.sleep(self.interval)
-    def start(self):
-        self.thread = threading.Thread(target=self.run, daemon=True, name=self.name)
-        self.thread.start()
-    def stop(self):
-        self.is_running = False
-        if self.thread: self.thread.join(timeout=5)
-
-# --- DIPERBAHARUI: DataSaveTask untuk menyimpan temperature dan humidity ---
-class DataSaveTask(BackgroundTask):
-    """Task untuk menyimpan data ke database setiap 10 menit sekali."""
-    
+class DataSaveTask:
+    """Background task for data saving"""
     def __init__(self, config, data_provider, db_manager):
-        super().__init__(config.DATA_SAVE_INTERVAL, "DataSaveTask")
         self.config = config
         self.data_provider = data_provider
         self.db_manager = db_manager
+        self.is_running = False
+        self.thread = None
+        self.stop_event = threading.Event()
     
-    def task(self):
-        """Menyimpan data suhu dan humidity terakhir dari memori ke database."""
+    def start(self):
+        if not self.config.ENABLE_BACKGROUND_TASKS:
+            logger.info("Background tasks disabled for shared hosting")
+            return
+            
+        self.is_running = True
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        logger.info("DataSaveTask started")
+    
+    def stop(self):
+        self.is_running = False
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=5)
+    
+    def _run(self):
+        while self.is_running and not self.stop_event.is_set():
+            try:
+                if self.stop_event.wait(self.config.DATA_SAVE_INTERVAL):
+                    break  # Stop event was set
+                if self.is_running:
+                    self._save_data()
+            except Exception as e:
+                logger.error(f"Error in DataSaveTask: {e}")
+    
+    def _save_data(self):
+        """Save latest data to database"""
         latest_temps = self.data_provider.get_latest_temperatures()
-        latest_humidity = self.data_provider.get_latest_humidity()  # === TAMBAHAN ===
+        latest_humidity = self.data_provider.get_latest_humidity()
         waktu = self.config.format_indonesia_time_simple()
         
-        logger.info(f"Menjalankan DataSaveTask pada {waktu}. Menyimpan data terakhir...")
+        logger.info(f"Saving data at {waktu}")
         
-        # Simpan data temperature
         for dryer_id, temp in latest_temps.items():
             if temp is not None:
-                success = self.db_manager.insert_temperature(waktu, dryer_id, temp)
-                if success:
-                    logger.info(f"Data temperature tersimpan untuk {dryer_id}: {waktu} | {temp:.2f}°C")
-                else:
-                    logger.error(f"Gagal menyimpan data temperature untuk {dryer_id}")
+                self.db_manager.insert_temperature(waktu, dryer_id, temp)
         
-        # === TAMBAHAN: Simpan data humidity ===
         for sensor_id, humidity in latest_humidity.items():
             if humidity is not None:
-                success = self.db_manager.insert_humidity(waktu, sensor_id, humidity)
-                if success:
-                    logger.info(f"Data humidity tersimpan untuk {sensor_id}: {waktu} | {humidity:.2f}%")
-                else:
-                    logger.error(f"Gagal menyimpan data humidity untuk {sensor_id}")
-        # =====================================
-# --------------------------------------------------------------------
-
-class DailyExcelReportTask(BackgroundTask):
-    def __init__(self, config, db_manager, telegram_service):
-        super().__init__(-1, "DailyExcelReportTask")
-        self.config = config
-        self.db_manager = db_manager
-        self.telegram_service = telegram_service
-    def run(self):
-        self.is_running = True
-        logger.info(f"Starting {self.name}. Laporan akan dikirim setiap pukul 00:00.")
-        while self.is_running:
-            try:
-                now = self.config.get_indonesia_time()
-                tomorrow = now + datetime.timedelta(days=1)
-                midnight = tomorrow.replace(hour=0, minute=0, second=5, microsecond=0)
-                seconds_to_wait = (midnight - now).total_seconds()
-                logger.info(f"Laporan harian berikutnya dalam {seconds_to_wait / 3600:.2f} jam.")
-                sleep_end_time = time.time() + seconds_to_wait
-                while time.time() < sleep_end_time and self.is_running:
-                    time.sleep(1)
-                if self.is_running: self.task()
-            except Exception as e:
-                logger.error(f"Error di dalam loop {self.name}: {e}")
-                time.sleep(300)
-    def task(self):
-        yesterday = (self.config.get_indonesia_time() - datetime.timedelta(days=1))
-        yesterday_str = yesterday.strftime('%Y-%m-%d')
-        logger.info(f"Memulai pembuatan laporan Excel untuk tanggal: {yesterday_str}")
-        rows = self.db_manager.get_data_by_date_pivoted(yesterday_str)
-        if not rows:
-            logger.warning(f"Tidak ada data untuk dilaporkan pada tanggal {yesterday_str}.")
-            return
-        wb = Workbook()
-        ws = wb.active
-        ws.title = f"Data Suhu {yesterday_str}"
-        ws.append(["Waktu (WIB)", "Dryer 1 (°C)", "Dryer 2 (°C)", "Dryer 3 (°C)"])
-        for row in rows: ws.append(list(row))
-        temp_dir = "/tmp" if os.path.exists("/tmp") else "."
-        filename = os.path.join(temp_dir, f"laporan_harian_{yesterday_str}.xlsx")
-        wb.save(filename)
-        caption = f"📊 *Laporan Harian Suhu - {yesterday.strftime('%d %B %Y')}*"
-        self.telegram_service.send_document(filename, caption)
-        time.sleep(10)
-        try: os.remove(filename)
-        except OSError: pass
-
-class KeepaliveTask(BackgroundTask):
-    def __init__(self, config):
-        super().__init__(1800, "KeepaliveTask")
-        self.config = config
-    def task(self):
-        app_url = os.getenv("FLY_APP_NAME", "")
-        if app_url:
-            try:
-                requests.get(f"https://{app_url}.fly.dev/keepalive", timeout=10)
-            except Exception as e:
-                logger.error(f"Keepalive error: {e}")
-
-class MonitorDataTask(BackgroundTask):
-    def __init__(self, config, db_manager, telegram_service):
-        super().__init__(3600, "MonitorDataTask")
-        self.config = config
-        self.db_manager = db_manager
-        self.telegram_service = telegram_service
-        self.is_error_notified = False
-    def task(self):
-        waktu_awal = (self.config.get_indonesia_time() - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-        rows = self.db_manager.get_data_since(waktu_awal)
-        if not rows: return
-        unique_values = set([round(row[3], 2) for row in rows if len(row) > 3 and row[3] is not None])
-        if len(unique_values) == 1:
-            if not self.is_error_notified:
-                suhu_error = list(unique_values)[0]
-                error_message = f"⚠️ *PERINGATAN SISTEM ERROR* ⚠️\n\nSuhu macet di *{suhu_error:.2f}°C*."
-                self.telegram_service.send_message(error_message)
-                self.is_error_notified = True
-        else:
-            if self.is_error_notified:
-                self.is_error_notified = False
+                self.db_manager.insert_humidity(waktu, sensor_id, humidity)
 
 class TemperatureMonitor:
+    """Main application class optimized for subdirectory deployment"""
+    
     def __init__(self):
         self.config = TemperatureMonitorConfig()
-        self.latest_temperatures = { "dryer1": None, "dryer2": None, "dryer3": None }
-        # === TAMBAHAN UNTUK HUMIDITY ===
-        self.latest_humidity = { "humidity1": None }
-        # ===============================
-        self.data_lock = threading.Lock()
-        self.alert_status = { "dryer1": "NORMAL", "dryer2": "NORMAL", "dryer3": "NORMAL" }
-        # === TAMBAHAN ALERT STATUS HUMIDITY ===
-        self.humidity_alert_status = { "humidity1": "NORMAL" }
-        # =====================================
+        self.latest_temperatures = {"dryer1": None, "dryer2": None, "dryer3": None}
+        self.latest_humidity = {"humidity1": None}
+        self.data_lock = threading.RLock()
+        self.alert_status = {"dryer1": "NORMAL", "dryer2": "NORMAL", "dryer3": "NORMAL"}
+        self.humidity_alert_status = {"humidity1": "NORMAL"}
         self.db_manager = DatabaseManager(self.config.DB_PATH)
-        self.telegram_service = TelegramService(self.config, self.db_manager)
         self.mqtt_service = MQTTService(self.config, self._on_mqtt_message)
-        self.tasks = []
-        self.notification_queue = Queue()  
+        self.data_save_task = None
     
-    # --- DIPERBAHARUI: _on_mqtt_message untuk handle temperature dan humidity ---
     def _on_mqtt_message(self, raw_value, topic):
-        """Callback untuk setiap pesan MQTT. Memproses suhu dan humidity serta mengirim notifikasi."""
-        
-        # Tentukan apakah ini temperature atau humidity berdasarkan topic
+        """Handle MQTT messages"""
         dryer_id = None
         humidity_sensor_id = None
         
-        # Check untuk temperature topics
         for id, t in self.config.MQTT_TOPICS.items():
-            if t == topic and "humidity" not in id:
-                dryer_id = id
-                break
-            elif t == topic and "humidity" in id:
-                humidity_sensor_id = id
+            if t == topic:
+                if "humidity" in id:
+                    humidity_sensor_id = id
+                else:
+                    dryer_id = id
                 break
 
-        # === HANDLE TEMPERATURE DATA ===
         if dryer_id:
             adjusted_temperature = self.config.apply_temperature_offset(raw_value)
-            
             with self.data_lock:
                 self.latest_temperatures[dryer_id] = adjusted_temperature
-
-            logger.info(f"Data temperature {{{dryer_id}}} diterima: {adjusted_temperature:.2f}°C")
+            logger.info(f"Temperature {dryer_id}: {adjusted_temperature:.2f}°C")
             self._check_temperature_alerts(dryer_id, adjusted_temperature)
         
-        # === HANDLE HUMIDITY DATA ===
         elif humidity_sensor_id:
-            # Humidity biasanya tidak perlu offset, langsung gunakan nilai raw
             with self.data_lock:
                 self.latest_humidity[humidity_sensor_id] = raw_value
-
-            logger.info(f"Data humidity {{{humidity_sensor_id}}} diterima: {raw_value:.2f}%")
+            logger.info(f"Humidity {humidity_sensor_id}: {raw_value:.2f}%")
             self._check_humidity_alerts(humidity_sensor_id, raw_value)
-        
-        else:
-            logger.warning(f"Received data from unknown topic: {topic}")
     
     def _check_temperature_alerts(self, dryer_id, temperature):
-        """Check dan kirim alert untuk temperature"""
-        waktu_kejadian = self.config.format_indonesia_time()
-        telegram_message = None
-        notification_payload = None
-
-        # Cek suhu tinggi
+        """Check temperature alerts"""
         if temperature > self.config.MAX_TEMP_ALERT:
             if self.alert_status[dryer_id] != "HIGH":
-                title = f"🔥 Suhu Tinggi ({dryer_id.upper()})"
-                message = f"Suhu mencapai {temperature:.1f}°C, melebihi batas normal {self.config.MAX_TEMP_ALERT}°C."
-
-                telegram_message = f"*{title}*\n\n🌡️ Suhu: *{temperature:.1f}°C*\n🕒 Waktu: {waktu_kejadian}"
-                notification_payload = {"title": title, "message": message}
+                logger.warning(f"HIGH TEMP ALERT - {dryer_id}: {temperature:.1f}°C")
                 self.alert_status[dryer_id] = 'HIGH'
-
-        # Cek suhu rendah
         elif temperature < self.config.MIN_TEMP_ALERT:
             if self.alert_status[dryer_id] != "LOW":
-                title = f"❄️ Suhu Rendah ({dryer_id.upper()})"
-                message = f"Suhu turun menjadi {temperature:.1f}°C, di bawah batas normal {self.config.MIN_TEMP_ALERT}°C."
-
-                telegram_message = f"*{title}*\n\n🌡️ Suhu: *{temperature:.1f}°C*\n🕒 Waktu: {waktu_kejadian}"
-                notification_payload = {"title": title, "message": message}
+                logger.warning(f"LOW TEMP ALERT - {dryer_id}: {temperature:.1f}°C")
                 self.alert_status[dryer_id] = 'LOW'
-
-        # Suhu kembali normal
         else:
             if self.alert_status[dryer_id] != 'NORMAL':
+                logger.info(f"Temperature normalized - {dryer_id}: {temperature:.1f}°C")
                 self.alert_status[dryer_id] = 'NORMAL'
-
-        # Kirim notifikasi jika ada
-        if telegram_message:
-            current_hour = self.config.get_indonesia_time().hour
-            if 6 <= current_hour < 17:
-                self.telegram_service.send_message(telegram_message)
-
-        if notification_payload:
-            self.notification_queue.put(notification_payload)
     
-    # === TAMBAHAN: Method untuk check humidity alerts ===
     def _check_humidity_alerts(self, sensor_id, humidity):
-        """Check dan kirim alert untuk humidity"""
-        waktu_kejadian = self.config.format_indonesia_time()
-        telegram_message = None
-        notification_payload = None
-
-        # Cek humidity tinggi
+        """Check humidity alerts"""
         if humidity > self.config.MAX_HUMIDITY_ALERT:
             if self.humidity_alert_status[sensor_id] != "HIGH":
-                title = f"💧 Kelembaban Tinggi ({sensor_id.upper()})"
-                message = f"Kelembaban mencapai {humidity:.1f}%, melebihi batas normal {self.config.MAX_HUMIDITY_ALERT}%."
-
-                telegram_message = f"*{title}*\n\n💧 Kelembaban: *{humidity:.1f}%*\n🕒 Waktu: {waktu_kejadian}"
-                notification_payload = {"title": title, "message": message}
+                logger.warning(f"HIGH HUMIDITY ALERT - {sensor_id}: {humidity:.1f}%")
                 self.humidity_alert_status[sensor_id] = 'HIGH'
-
-        # Cek humidity rendah
         elif humidity < self.config.MIN_HUMIDITY_ALERT:
             if self.humidity_alert_status[sensor_id] != "LOW":
-                title = f"🏜️ Kelembaban Rendah ({sensor_id.upper()})"
-                message = f"Kelembaban turun menjadi {humidity:.1f}%, di bawah batas normal {self.config.MIN_HUMIDITY_ALERT}%."
-
-                telegram_message = f"*{title}*\n\n💧 Kelembaban: *{humidity:.1f}%*\n🕒 Waktu: {waktu_kejadian}"
-                notification_payload = {"title": title, "message": message}
+                logger.warning(f"LOW HUMIDITY ALERT - {sensor_id}: {humidity:.1f}%")
                 self.humidity_alert_status[sensor_id] = 'LOW'
-
-        # Humidity kembali normal
         else:
             if self.humidity_alert_status[sensor_id] != 'NORMAL':
+                logger.info(f"Humidity normalized - {sensor_id}: {humidity:.1f}%")
                 self.humidity_alert_status[sensor_id] = 'NORMAL'
 
-        # Kirim notifikasi jika ada
-        if telegram_message:
-            current_hour = self.config.get_indonesia_time().hour
-            if 6 <= current_hour < 17:
-                self.telegram_service.send_message(telegram_message)
-
-        if notification_payload:
-            self.notification_queue.put(notification_payload)
-    # =======================================================
-
     def get_latest_temperatures(self):
-        """Mendapatkan semua suhu terbaru dari memori."""
+        """Get latest temperatures"""
         with self.data_lock:
             return self.latest_temperatures.copy()
     
-    # === TAMBAHAN: Method untuk get humidity ===
     def get_latest_humidity(self):
-        """Mendapatkan semua humidity terbaru dari memori."""
+        """Get latest humidity"""
         with self.data_lock:
             return self.latest_humidity.copy()
-    # ==========================================
     
     def start_background_tasks(self):
-        """Memulai semua background tasks"""
-        self.tasks.append(DataSaveTask(self.config, self, self.db_manager))
-        self.tasks.append(DailyExcelReportTask(self.config, self.db_manager, self.telegram_service))
-        self.tasks.append(KeepaliveTask(self.config))
-        self.tasks.append(MonitorDataTask(self.config, self.db_manager, self.telegram_service))
-        
-        for task in self.tasks:
-            task.start()
-            
-        logger.info("All background tasks started")
+        """Start background tasks if enabled"""
+        if self.config.ENABLE_BACKGROUND_TASKS:
+            self.data_save_task = DataSaveTask(self.config, self, self.db_manager)
+            self.data_save_task.start()
+            logger.info("Background tasks started")
+        else:
+            logger.info("Background tasks disabled for shared hosting")
     
     def stop_background_tasks(self):
-        for task in self.tasks:
-            task.stop()
-        logger.info("All background tasks stopped")
+        """Stop background tasks"""
+        if self.data_save_task:
+            self.data_save_task.stop()
     
     def create_flask_app(self):
-        app = Flask(__name__, template_folder='templates', static_folder='static')
+        """Create Flask app with subdirectory support"""
+        app = Flask(__name__, 
+                   template_folder='templates', 
+                   static_folder='static',
+                   static_url_path=f'{SUBDIRECTORY}/static')  # Important for subdirectory
+        
         app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'default-secret-key-for-dev')
-
-        # ✅ SESSION CONFIGURATION untuk 24 jam
         app.config.update(
-            PERMANENT_SESSION_LIFETIME=timedelta(hours=24),  # 24 jam
-            SESSION_COOKIE_HTTPONLY=True,  # Security: tidak bisa diakses via JavaScript
-            SESSION_COOKIE_SECURE=False,   # Set True jika pakai HTTPS
-            SESSION_COOKIE_SAMESITE='Lax'  # CSRF protection
+            PERMANENT_SESSION_LIFETIME=timedelta(hours=24),
+            SESSION_COOKIE_HTTPONLY=True,
+            SESSION_COOKIE_SECURE=False,
+            SESSION_COOKIE_SAMESITE='Lax'
         )
 
+        # Configure Flask-Login for subdirectory
         login_manager = LoginManager()
         login_manager.init_app(app)
         login_manager.login_view = 'login'
         login_manager.session_protection = "strong"
 
-        # --- Login manager
         @login_manager.user_loader
         def load_user(user_id):
             return self.db_manager.get_user_by_id(user_id)
         
-        #Custom unauthorized handler untuk smart redirect
         @login_manager.unauthorized_handler
         def unauthorized():
             if request.endpoint != 'login':
                 return redirect(url_for('login', next=request.url))
             return redirect(url_for('login'))
 
-        # Index.html
+        # Routes
         @app.route("/")
         @login_required
         @check_session_timeout  
@@ -918,15 +611,13 @@ class TemperatureMonitor:
                     "current_suhu_1": f"{self.latest_temperatures['dryer1']:.1f} °C" if self.latest_temperatures['dryer1'] else "N/A",
                     "current_suhu_2": f"{self.latest_temperatures['dryer2']:.1f} °C" if self.latest_temperatures['dryer2'] else "N/A",
                     "current_suhu_3": f"{self.latest_temperatures['dryer3']:.1f} °C" if self.latest_temperatures['dryer3'] else "N/A",
-                    # === TAMBAHAN HUMIDITY DATA ===
                     "current_humidity_1": f"{self.latest_humidity['humidity1']:.1f} %" if self.latest_humidity['humidity1'] else "N/A",
-                    # ==============================
                     "current_time": self.config.format_indonesia_time(),
-                    "timezone": str(self.config.INDONESIA_TZ)
+                    "timezone": str(self.config.INDONESIA_TZ),
+                    "subdirectory": SUBDIRECTORY  # Pass to template
                 }
             return render_template("index.html", **context, active_page='dryer')
 
-        # Dwidaya
         @app.route("/dwidaya")
         @login_required
         @check_session_timeout  
@@ -936,11 +627,10 @@ class TemperatureMonitor:
                     "current_suhu_1": f"{self.latest_temperatures['dryer1']:.1f} °C" if self.latest_temperatures['dryer1'] else "N/A",
                     "current_suhu_2": f"{self.latest_temperatures['dryer2']:.1f} °C" if self.latest_temperatures['dryer2'] else "N/A",
                     "current_suhu_3": f"{self.latest_temperatures['dryer3']:.1f} °C" if self.latest_temperatures['dryer3'] else "N/A",
-                    # === TAMBAHAN HUMIDITY DATA ===
                     "current_humidity_1": f"{self.latest_humidity['humidity1']:.1f} %" if self.latest_humidity['humidity1'] else "N/A",
-                    # ==============================
                     "current_time": self.config.format_indonesia_time(),
-                    "timezone": str(self.config.INDONESIA_TZ)
+                    "timezone": str(self.config.INDONESIA_TZ),
+                    "subdirectory": SUBDIRECTORY
                 }
             return render_template("dwidaya.html", **context)
 
@@ -955,110 +645,77 @@ class TemperatureMonitor:
                 user = self.db_manager.get_user_by_username(username)
                 
                 if user and check_password_hash(user.password, password):
-                    # ✅ LOGIN USER dengan permanent session
-                    login_user(user, remember=False)  # Tidak pakai "remember me"
-                    session.permanent = True  # Set session sebagai permanent
-                    
-                    # ✅ SIMPAN TIMESTAMP LOGIN
+                    login_user(user, remember=False)
+                    session.permanent = True
                     session['login_timestamp'] = time.time()
                     session['last_activity'] = time.time()
                     session['username'] = user.username
                     
-                    # Smart redirect
                     next_page = request.args.get('next')
                     if not next_page or not is_safe_url(next_page):
                         next_page = url_for('index')
                     
-                    flash(f'Welcome back, {user.username}! Session valid for 24 hours.', 'success')
-                    logger.info(f"User {user.username} logged in successfully from {request.remote_addr}")
+                    flash(f'Welcome back, {user.username}!', 'success')
+                    logger.info(f"User {user.username} logged in from {request.remote_addr}")
                     
                     return redirect(next_page)
                 else:
                     flash('Username atau password salah', 'danger')
-                    logger.warning(f"Failed login attempt for username: {username} from {request.remote_addr}")
+                    logger.warning(f"Failed login attempt for {username} from {request.remote_addr}")
             
-            return render_template('login.html')
+            return render_template('login.html', subdirectory=SUBDIRECTORY)
     
         @app.route('/logout')
         @login_required
         def logout():
             logout_user()
+            session.clear()
             flash('You have been logged out successfully.', 'info')
             return redirect(url_for('login'))
 
-        # ---- DIPERBAHARUI: Stream Data untuk temperature dan humidity ----
-        @app.route("/stream-data")
+        # API endpoint untuk polling data (mengganti SSE)
+        @app.route("/current-data")
         @login_required
-        def stream_data():
-            def generate_data():
-                """
-                Generator function yang akan mengirim data suhu dan humidity terbaru.
-                """
-                try:
-                    while True:
-                        # Ambil data suhu dan humidity terbaru dari memori
-                        with self.data_lock:
-                            latest_temps = self.latest_temperatures.copy()
-                            latest_humidity = self.latest_humidity.copy()
+        def get_current_data():
+            """API endpoint for current data polling"""
+            try:
+                with self.data_lock:
+                    data_payload = {
+                        "dryer1": f"{self.latest_temperatures['dryer1']:.1f}" if self.latest_temperatures['dryer1'] is not None else "N/A",
+                        "dryer2": f"{self.latest_temperatures['dryer2']:.1f}" if self.latest_temperatures['dryer2'] is not None else "N/A",
+                        "dryer3": f"{self.latest_temperatures['dryer3']:.1f}" if self.latest_temperatures['dryer3'] is not None else "N/A",
+                        "humidity1": f"{self.latest_humidity['humidity1']:.1f}" if self.latest_humidity['humidity1'] is not None else "N/A",
+                        "timestamp": self.config.format_indonesia_time(),
+                        "mqtt_connected": self.mqtt_service.is_connected
+                    }
+                return jsonify(data_payload)
+            except Exception as e:
+                logger.error(f"Error getting current data: {e}")
+                return jsonify({"error": str(e)}), 500
 
-                        # Format data menjadi JSON
-                        data_payload = {
-                            "dryer1": f"{latest_temps['dryer1']:.1f}" if latest_temps['dryer1'] is not None else "N/A",
-                            "dryer2": f"{latest_temps['dryer2']:.1f}" if latest_temps['dryer2'] is not None else "N/A",
-                            "dryer3": f"{latest_temps['dryer3']:.1f}" if latest_temps['dryer3'] is not None else "N/A",
-                            # === TAMBAHAN HUMIDITY DATA ===
-                            "humidity1": f"{latest_humidity['humidity1']:.1f}" if latest_humidity['humidity1'] is not None else "N/A",
-                            # ==============================
-                        }
-                        
-                        # Kirim data dalam format SSE: "data: <json_string>\n\n"
-                        yield f"data: {json.dumps(data_payload)}\n\n"
-                        
-                        # Tunggu sebentar sebelum mengirim data berikutnya untuk efisiensi
-                        time.sleep(2) # Kirim update setiap 2 detik
-                except GeneratorExit:
-                    # Ini akan terjadi jika klien menutup koneksi
-                    logger.info("Koneksi stream data ditutup oleh klien.")
-
-            # Kembalikan response dengan tipe mimetype 'text/event-stream'
-            return Response(generate_data(), mimetype='text/event-stream')
-        
-        # --- CHART Requirements
         @app.route("/chart-data")
         @login_required
         def get_chart_data():
-            """
-            Menyediakan data suhu untuk tanggal yang dipilih (dari parameter 'date')
-            dalam format yang siap digunakan oleh Chart.js.
-            """
+            """Chart data API for temperature"""
             try:
-                # 1. Ambil parameter 'date' dari request. Jika tidak ada, gunakan tanggal hari ini.
                 selected_date = request.args.get('date', self.config.get_indonesia_time().strftime('%Y-%m-%d'))
-
-                # 2. Gunakan metode yang sudah ada untuk mengambil data harian yang sudah di-pivot
                 rows = self.db_manager.get_data_by_date_pivoted(selected_date)
 
                 if not rows:
-                    # Kirim data kosong jika tidak ada record pada tanggal tersebut
                     return jsonify({"labels": [], "datasets": []})
 
-                # 3. Proses data untuk format Chart.js
                 labels = []
                 dryer1_data = []
                 dryer2_data = []
                 dryer3_data = []
 
                 for row in rows:
-                    # row[0] formatnya "YYYY-MM-DD HH:MM:SS", kita hanya butuh waktunya
-                    waktu = row[0].split(' ')[1][:5] # Ambil HH:MM
+                    waktu = row[0].split(' ')[1][:5]
                     labels.append(waktu)
-                    
-                    # row[1] = dryer1_suhu, row[2] = dryer2_suhu, dst.
                     dryer1_data.append(row[1])
                     dryer2_data.append(row[2])
                     dryer3_data.append(row[3])
 
-                # 4. Susun data dalam struktur JSON yang diharapkan oleh frontend
                 chart_data = {
                     "labels": labels,
                     "datasets": [
@@ -1094,13 +751,10 @@ class TemperatureMonitor:
                 logger.error(f"Error getting chart data: {e}")
                 return jsonify({"error": str(e)}), 500
         
-        # === TAMBAHAN: Chart data untuk humidity ===
         @app.route("/humidity-chart-data")
         @login_required
         def get_humidity_chart_data():
-            """
-            Menyediakan data humidity untuk tanggal yang dipilih dalam format Chart.js.
-            """
+            """Chart data API for humidity"""
             try:
                 selected_date = request.args.get('date', self.config.get_indonesia_time().strftime('%Y-%m-%d'))
                 rows = self.db_manager.get_humidity_by_date(selected_date, "humidity1")
@@ -1112,9 +766,9 @@ class TemperatureMonitor:
                 humidity_data = []
 
                 for row in rows:
-                    waktu = row[0].split(' ')[1][:5]  # Ambil HH:MM
+                    waktu = row[0].split(' ')[1][:5]
                     labels.append(waktu)
-                    humidity_data.append(row[1])  # humidity value
+                    humidity_data.append(row[1])
 
                 chart_data = {
                     "labels": labels,
@@ -1134,113 +788,133 @@ class TemperatureMonitor:
             except Exception as e:
                 logger.error(f"Error getting humidity chart data: {e}")
                 return jsonify({"error": str(e)}), 500
-        # ==========================================
-        
-        @app.route('/stream-notifications')
-        @login_required
-        def stream_notifications():
-            def generate():
-                logger.info("Client connected to notification stream.")
-                try:
-                    while True:
-                        try:
-                            # Ambil notifikasi dari antrean dengan timeout
-                            notification = self.notification_queue.get(timeout=25)
-                            # Format sebagai Server-Sent Event (SSE)
-                            yield f"data: {json.dumps(notification)}\n\n"
-                        except Empty:
-                            # Kirim heartbeat (komentar) untuk menjaga koneksi tetap terbuka
-                            yield ": heartbeat\n\n"
-                except GeneratorExit:
-                    logger.info("Client disconnected from notification stream.")
-            
-            # Buat Response dengan mimetype khusus untuk SSE
-            return Response(generate(), mimetype='text/event-stream')
         
         @app.route("/data")
+        @login_required
         def get_data_api():
+            """Historical data API"""
             selected_date = request.args.get('date')
-            # Memanggil dengan latest_only=True untuk mendapatkan 1 data terbaru
-            rows = self.db_manager.get_data_by_date_pivoted(selected_date, latest_only=True)
+            latest_only = request.args.get('latest_only', 'true').lower() == 'true'
+            rows = self.db_manager.get_data_by_date_pivoted(selected_date, latest_only=latest_only)
             data = [{"waktu": r[0], "dryer1": r[1], "dryer2": r[2], "dryer3": r[3]} for r in rows]
             return jsonify(data)
         
-        # === TAMBAHAN: API untuk humidity data ===
         @app.route("/humidity-data")
+        @login_required
         def get_humidity_data_api():
+            """Historical humidity data API"""
             selected_date = request.args.get('date')
             sensor_id = request.args.get('sensor_id', 'humidity1')
-            rows = self.db_manager.get_humidity_by_date(selected_date, sensor_id, latest_only=True)
+            latest_only = request.args.get('latest_only', 'true').lower() == 'true'
+            rows = self.db_manager.get_humidity_by_date(selected_date, sensor_id, latest_only=latest_only)
             data = [{"waktu": r[0], "humidity": r[1]} for r in rows]
             return jsonify(data)
-        # ========================================
 
         @app.route("/download")
+        @login_required
         def download_excel():
+            """Excel download endpoint"""
             selected_date = request.args.get('date')
-            # Memanggil tanpa parameter tambahan untuk mendapatkan semua data
             rows = self.db_manager.get_data_by_date_pivoted(selected_date)
-            if not rows: return "Tidak ada data.", 404
+            
+            if not rows: 
+                return "Tidak ada data.", 404
+                
             wb = Workbook()
             ws = wb.active
+            ws.title = f"Data Suhu {selected_date}"
             ws.append(["Waktu (WIB)", "Dryer 1 (°C)", "Dryer 2 (°C)", "Dryer 3 (°C)"])
-            for row in rows: ws.append(list(row))
+            
+            for row in rows: 
+                ws.append(list(row))
+                
             buffer = BytesIO()
             wb.save(buffer)
             buffer.seek(0)
+            
             filename = f"laporan_{selected_date}.xlsx"
-            return Response(buffer, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': f'attachment;filename={filename}'})
+            return Response(
+                buffer, 
+                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 
+                headers={'Content-Disposition': f'attachment;filename={filename}'}
+            )
         
         @app.route("/keepalive")
         def keepalive():
-            return {"status": "alive", "timestamp": self.config.format_indonesia_time()}
+            """Health check endpoint"""
+            return {
+                "status": "alive", 
+                "timestamp": self.config.format_indonesia_time(),
+                "mqtt_connected": self.mqtt_service.is_connected,
+                "subdirectory": SUBDIRECTORY,
+                "latest_data": {
+                    "temperatures": self.get_latest_temperatures(),
+                    "humidity": self.get_latest_humidity()
+                }
+            }
         
-        @app.route("/test-telegram")
-        def test_telegram():
-            message = f"🧪 **Test Message**\n🕐 {self.config.format_indonesia_time()}"
-            self.telegram_service.send_message(message)
-            return {"status": "success", "message": "Test message queued"}
-        
-        # ==== Kedi ====
         @app.route('/kedi')
         @login_required
         @check_session_timeout
         def kedi():
-            return render_template('navigation/kedi.html', active_page='kedi')
+            return render_template('navigation/kedi.html', active_page='kedi', subdirectory=SUBDIRECTORY)
         
-        # ==== Boiler ====
         @app.route('/boiler')
         @login_required
         @check_session_timeout
         def boiler():
-            return render_template('navigation/boiler.html', active_page='boiler')
+            return render_template('navigation/boiler.html', active_page='boiler', subdirectory=SUBDIRECTORY)
+
         
         return app
     
-    def run(self):
-        # --- LOGIN SYSTEM: Membuat user awal dari secrets saat aplikasi start ---
+    def start_app(self):
+        """Start the application"""
+        # Create initial user
         admin_user = os.getenv('ADMIN_USER')
         admin_pass = os.getenv('ADMIN_PASSWORD')
         if admin_user and admin_pass:
             self.db_manager.create_initial_user(admin_user, admin_pass)
         else:
-            logger.warning("ADMIN_USER dan ADMIN_PASSWORD tidak diatur. Tidak dapat membuat/memverifikasi user admin.")
-        # --------------------------------------------------------------------
+            logger.warning("ADMIN_USER dan ADMIN_PASSWORD tidak diatur.")
+            
         try:
-            self.mqtt_service.connect()
-            self.telegram_service.start_worker()
+            # Start MQTT connection
+            mqtt_connected = self.mqtt_service.connect()
+            if not mqtt_connected:
+                logger.warning("MQTT connection failed, continuing without MQTT")
+            
+            # Start background tasks
             self.start_background_tasks()
+            
+            # Create Flask app
             app = self.create_flask_app()
-            flask_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080))), daemon=True)
-            flask_thread.start()
-            self.telegram_service.start_polling()
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-        finally:
+            logger.info(f"Temperature monitoring application started for subdirectory: {SUBDIRECTORY}")
+            return app
+            
+        except Exception as e:
+            logger.error(f"Error starting application: {e}")
             self.stop_background_tasks()
-            self.telegram_service.stop_worker()
             self.mqtt_service.disconnect()
+            raise
+
+# Factory function for WSGI
+def create_app():
+    """Factory function to create Flask application"""
+    try:
+        monitor = TemperatureMonitor()
+        app = monitor.start_app()
+        logger.info("Application factory completed successfully")
+        return app
+    except Exception as e:
+        logger.error(f"Failed to create application: {e}")
+        raise
+
+# WSGI entry point for shared hosting
+application = create_app()
 
 if __name__ == "__main__":
-    monitor = TemperatureMonitor()
-    monitor.run()
+    app = create_app()
+    port = int(os.environ.get("PORT", 8080))
+    host = os.environ.get("HOST", "0.0.0.0")
+    app.run(host=host, port=port, debug=False)
